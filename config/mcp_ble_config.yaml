@@ -1,0 +1,56 @@
+# Server Configuration
+server:
+  host: "127.0.0.1"  # MCP server host
+  port: 8080         # MCP server port
+  debug: false       # Enable debug logging
+  auth:
+    enabled: true    # Enable authentication
+    api_keys:        # List of valid API keys
+      - "key1"
+      - "key2"
+
+# BLE Configuration
+ble:
+  scan_duration: 5.0           # Duration in seconds for BLE scanning
+  connection_timeout: 10.0     # Timeout for connection attempts
+  mtu_size: 512               # Maximum transfer unit size
+  auto_reconnect: true        # Automatically reconnect to devices
+  reconnect_attempts: 3       # Number of reconnection attempts
+  reconnect_delay: 2.0        # Delay between reconnection attempts
+
+# Device Filters
+devices:
+  - name: "MySmartLight"      # Device name filter
+    address: "00:11:22:33:44:55"  # Optional MAC address
+    services:                 # Required services (UUIDs)
+      - "0000180f-0000-1000-8000-00805f9b34fb"
+    auto_connect: true        # Connect automatically on startup
+    alias: "living_room_light"  # Human-readable alias
+
+  - name_pattern: "Sensor.*"  # Regex pattern for device names
+    alias: "temperature_sensor"
+
+# Device Type Mappings
+device_types:
+  - type: "generic_light"
+    service: "0000180f-0000-1000-8000-00805f9b34fb"
+    characteristics:
+      power:
+        uuid: "00002a19-0000-1000-8000-00805f9b34fb"
+        operations: ["read", "write"]
+        data_type: "uint8"
+        friendly_values:
+          0: "OFF"
+          1: "ON"
+      brightness:
+        uuid: "00002a57-0000-1000-8000-00805f9b34fb"
+        operations: ["read", "write"]
+        data_type: "uint8"
+        value_range: [0, 100]
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  file: "mcp_ble_server.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5 
