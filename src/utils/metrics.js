@@ -18,6 +18,11 @@ const metrics = {
     help: 'Number of active MCP connections'
   }),
 
+  mcpConnectionsRejected: new prometheus.Counter({
+    name: 'mcp_connections_rejected_total',
+    help: 'Total number of rejected MCP connections'
+  }),
+
   // Message metrics
   mcpMessagesReceived: new prometheus.Counter({
     name: 'mcp_messages_received_total',
@@ -41,6 +46,76 @@ const metrics = {
     name: 'mcp_message_latency_seconds',
     help: 'Latency of MCP message processing',
     buckets: [0.001, 0.005, 0.01, 0.05, 0.1]
+  }),
+
+  // Authentication metrics
+  authSuccess: new prometheus.Counter({
+    name: 'mcp_auth_success_total',
+    help: 'Total number of successful authentications'
+  }),
+
+  authError: new prometheus.Counter({
+    name: 'mcp_auth_error_total',
+    help: 'Total number of authentication errors',
+    labelNames: ['code']
+  }),
+
+  // API key validation metrics
+  apiKeyValidation: new prometheus.Counter({
+    name: 'mcp_api_key_validation_total',
+    help: 'Total number of API key validations',
+    labelNames: ['result']
+  }),
+
+  // Rate limiting metrics
+  rateLimitExceeded: new prometheus.Counter({
+    name: 'mcp_rate_limit_exceeded_total',
+    help: 'Total number of rate limit exceeded events',
+    labelNames: ['key']
+  }),
+
+  // Session cleanup metrics
+  authCleanupSuccess: new prometheus.Counter({
+    name: 'mcp_auth_cleanup_success_total',
+    help: 'Total number of successful session cleanups'
+  }),
+
+  authCleanupError: new prometheus.Counter({
+    name: 'mcp_auth_cleanup_error_total',
+    help: 'Total number of session cleanup errors',
+    labelNames: ['code']
+  }),
+
+  // Session management metrics
+  authSessionCreationSuccess: new prometheus.Counter({
+    name: 'mcp_auth_session_creation_success_total',
+    help: 'Total number of successful session creations'
+  }),
+
+  authSessionCreationError: new prometheus.Counter({
+    name: 'mcp_auth_session_creation_error_total',
+    help: 'Total number of session creation errors'
+  }),
+
+  authSessionRemovalSuccess: new prometheus.Counter({
+    name: 'mcp_auth_session_removal_success_total',
+    help: 'Total number of successful session removals'
+  }),
+
+  authSessionRemovalError: new prometheus.Counter({
+    name: 'mcp_auth_session_removal_error_total',
+    help: 'Total number of session removal errors'
+  }),
+
+  // Rate limit check metrics
+  authRateLimitCheckSuccess: new prometheus.Counter({
+    name: 'mcp_auth_rate_limit_check_success_total',
+    help: 'Total number of successful rate limit checks'
+  }),
+
+  authRateLimitExceeded: new prometheus.Counter({
+    name: 'mcp_auth_rate_limit_exceeded_total',
+    help: 'Total number of rate limit exceeded events'
   })
 };
 

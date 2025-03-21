@@ -1,416 +1,360 @@
 # API Documentation
 
 ## Overview
-This document provides detailed information about the MCP BLE Server API, including classes, methods, events, and usage examples.
+This document provides detailed information about the MCP BLE Server API, including authentication, message types, and usage examples.
 
-## BLEService Class
+## Authentication
 
-### Constructor
+### Authentication Flow
+1. Connect to the WebSocket server
+2. Authenticate using an API key
+3. Receive a JWT token
+4. Use the token for subsequent requests
+5. Validate session when needed
+6. Logout when done
+
+### Authentication Messages
+
+#### Authenticate
+Authenticate with the server using an API key.
 
 ```javascript
-const bleService = new BLEService(config);
+// Request
+{
+    "type": "AUTHENTICATE",
+    "params": {
+        "apiKey": "your-api-key"
+    }
+}
+
+// Response
+{
+    "type": "AUTHENTICATED",
+    "params": {
+        "token": "jwt-token",
+        "expiresIn": "24h"
+    }
+}
 ```
 
-**Parameters:**
-- `config` (Object, optional): Configuration object with the following properties:
-  ```javascript
-  {
-    device_filters: [],           // Array of device filters
-    scan_duration: 10,            // Scan duration in seconds
-    connection_timeout: 5,        // Connection timeout in seconds
-    auto_reconnect: true,         // Enable automatic reconnection
-    reconnection_attempts: 3      // Maximum reconnection attempts
-  }
-  ```
+#### Validate Session
+Validate the current session token.
 
-### Methods
+```javascript
+// Request
+{
+    "type": "SESSION_VALID",
+    "params": {
+        "token": "your-jwt-token"
+    }
+}
 
-#### startScanning()
+// Response
+{
+    "type": "SESSION_VALID",
+    "params": {
+        "valid": true|false
+    }
+}
+```
+
+#### Logout
+End the current session.
+
+```javascript
+// Request
+{
+    "type": "LOGOUT"
+}
+
+// Response
+{
+    "type": "LOGGED_OUT"
+}
+```
+
+### Error Responses
+```javascript
+{
+    "type": "ERROR",
+    "code": "ERROR_CODE",
+    "message": "Error description"
+}
+```
+
+Common error codes:
+- `INVALID_API_KEY`: The provided API key is invalid
+- `RATE_LIMIT_EXCEEDED`: Too many requests in the current time window
+- `SESSION_EXPIRED`: The session token has expired
+- `INVALID_TOKEN`: The provided token is invalid
+- `INVALID_PARAMS`: Missing or invalid parameters in the request
+
+## BLE Operations
+
+### Device Discovery
 Start scanning for BLE devices.
 
 ```javascript
-await bleService.startScanning();
+// Request
+{
+    "type": "SCAN_START",
+    "params": {
+        "duration": 5,  // Optional: scan duration in seconds
+        "filters": {    // Optional: device filters
+            "name": "MyDevice",
+            "services": ["service-uuid"]
+        }
+    }
+}
+
+// Response
+{
+    "type": "SCAN_STARTED"
+}
+
+// Device Discovery Event
+{
+    "type": "DEVICE_DISCOVERED",
+    "params": {
+        "id": "device-id",
+        "name": "device-name",
+        "address": "device-address",
+        "rssi": -65,
+        "manufacturerData": {}
+    }
+}
 ```
 
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEScanError`: If scanning fails to start
-- `BLEError`: For other BLE-related errors
-
-#### stopScanning()
-Stop scanning for BLE devices.
+Stop scanning for devices.
 
 ```javascript
-await bleService.stopScanning();
+// Request
+{
+    "type": "SCAN_STOP"
+}
+
+// Response
+{
+    "type": "SCAN_STOPPED"
+}
 ```
 
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEScanError`: If scanning fails to stop
-- `BLEError`: For other BLE-related errors
-
-#### connectToDevice(device)
-Connect to a specific BLE device.
+### Device Connection
+Connect to a BLE device.
 
 ```javascript
-const device = await bleService.connectToDevice({
-  name: 'MyDevice',
-  alias: 'my-device'
-});
+// Request
+{
+    "type": "CONNECT",
+    "params": {
+        "deviceId": "device-id"
+    }
+}
+
+// Response
+{
+    "type": "CONNECTED",
+    "params": {
+        "deviceId": "device-id",
+        "name": "device-name",
+        "address": "device-address"
+    }
+}
 ```
 
-**Parameters:**
-- `device` (Object): Device object with the following properties:
-  ```javascript
-  {
-    name: string,           // Device name
-    address: string,        // Device MAC address
-    services: string[],     // Array of service UUIDs
-    alias: string          // Custom alias for the device
-  }
-  ```
-
-**Returns:** Promise<BLEDevice>
-
-**Throws:**
-- `BLEDeviceError`: If device is not found
-- `BLEConnectionError`: If connection fails
-- `BLEError`: For other BLE-related errors
-
-#### disconnectFromDevice(deviceId)
-Disconnect from a specific device.
+Disconnect from a device.
 
 ```javascript
-await bleService.disconnectFromDevice('device-1');
+// Request
+{
+    "type": "DISCONNECT",
+    "params": {
+        "deviceId": "device-id"
+    }
+}
+
+// Response
+{
+    "type": "DISCONNECTED",
+    "params": {
+        "deviceId": "device-id"
+    }
+}
 ```
 
-**Parameters:**
-- `deviceId` (string): ID or alias of the device to disconnect
-
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEDeviceError`: If device is not found
-- `BLEConnectionError`: If disconnection fails
-- `BLEError`: For other BLE-related errors
-
-#### getConnectedDevices()
-Get a list of currently connected devices.
+### Characteristic Operations
+Read a characteristic value.
 
 ```javascript
-const devices = bleService.getConnectedDevices();
+// Request
+{
+    "type": "READ_CHARACTERISTIC",
+    "params": {
+        "deviceId": "device-id",
+        "serviceUuid": "service-uuid",
+        "characteristicUuid": "characteristic-uuid"
+    }
+}
+
+// Response
+{
+    "type": "CHARACTERISTIC_READ",
+    "params": {
+        "deviceId": "device-id",
+        "serviceUuid": "service-uuid",
+        "characteristicUuid": "characteristic-uuid",
+        "value": "base64-encoded-value"
+    }
+}
 ```
 
-**Returns:** Map<string, BLEDevice>
-
-#### cleanup()
-Clean up resources and remove event listeners.
+Write a characteristic value.
 
 ```javascript
-bleService.cleanup();
+// Request
+{
+    "type": "WRITE_CHARACTERISTIC",
+    "params": {
+        "deviceId": "device-id",
+        "serviceUuid": "service-uuid",
+        "characteristicUuid": "characteristic-uuid",
+        "value": "base64-encoded-value"
+    }
+}
+
+// Response
+{
+    "type": "CHARACTERISTIC_WRITTEN",
+    "params": {
+        "deviceId": "device-id",
+        "serviceUuid": "service-uuid",
+        "characteristicUuid": "characteristic-uuid"
+    }
+}
 ```
 
-**Returns:** void
+## Rate Limiting
+The server implements rate limiting to prevent abuse:
+- Rate limit window: 1 minute
+- Maximum requests per window: 100
+- Rate limit is applied per client ID
 
-### Events
+## Session Management
+- Sessions expire after 24 hours of inactivity
+- Sessions are automatically cleaned up every 5 minutes
+- Each client can have one active session at a time
 
-#### deviceDiscovered
-Emitted when a new device is discovered during scanning.
-
-```javascript
-bleService.on('deviceDiscovered', (device) => {
-  console.log('Discovered device:', device);
-});
-```
-
-**Event Data:**
+## Error Handling
+All errors are returned in a consistent format:
 ```javascript
 {
-  id: string,              // Unique device ID
-  name: string,            // Device name
-  address: string,         // Device MAC address
-  rssi: number,           // Signal strength
-  advertisementData: Buffer // Raw advertisement data
+    "type": "ERROR",
+    "code": "ERROR_CODE",
+    "message": "Human-readable error description"
 }
 ```
 
-#### deviceConnected
-Emitted when a device is successfully connected.
+Common error scenarios:
+1. Authentication failures
+2. Rate limit exceeded
+3. Invalid parameters
+4. Device not found
+5. Connection failures
+6. Operation timeouts
+
+## Best Practices
+1. Always authenticate before performing BLE operations
+2. Validate session before critical operations
+3. Handle rate limiting gracefully
+4. Implement proper error handling
+5. Clean up resources by logging out when done
+6. Use appropriate timeouts for operations
+7. Monitor connection state
+8. Implement retry logic for transient failures
+
+## Example Usage
 
 ```javascript
-bleService.on('deviceConnected', (device) => {
-  console.log('Connected to device:', device);
-});
-```
+const WebSocket = require('ws');
 
-**Event Data:** BLEDevice object
+async function connectAndAuthenticate() {
+    const ws = new WebSocket('ws://localhost:8080');
+    
+    return new Promise((resolve, reject) => {
+        ws.on('open', async () => {
+            try {
+                // Authenticate
+                ws.send(JSON.stringify({
+                    type: 'AUTHENTICATE',
+                    params: {
+                        apiKey: 'your-api-key'
+                    }
+                }));
 
-#### deviceDisconnected
-Emitted when a device is disconnected.
+                // Handle authentication response
+                ws.on('message', (data) => {
+                    const response = JSON.parse(data);
+                    if (response.type === 'AUTHENTICATED') {
+                        resolve({
+                            ws,
+                            token: response.params.token
+                        });
+                    } else if (response.type === 'ERROR') {
+                        reject(new Error(response.message));
+                    }
+                });
+            } catch (error) {
+                reject(error);
+            }
+        });
 
-```javascript
-bleService.on('deviceDisconnected', (deviceId) => {
-  console.log('Device disconnected:', deviceId);
-});
-```
-
-**Event Data:** string (device ID)
-
-#### error
-Emitted when an error occurs.
-
-```javascript
-bleService.on('error', (error) => {
-  console.error('BLE error:', error);
-});
-```
-
-**Event Data:** BLEError object
-
-## BLEDevice Class
-
-### Methods
-
-#### readCharacteristic(serviceUuid, characteristicUuid)
-Read data from a characteristic.
-
-```javascript
-const data = await device.readCharacteristic(
-  '180f',
-  '2a19'
-);
-```
-
-**Parameters:**
-- `serviceUuid` (string): UUID of the service
-- `characteristicUuid` (string): UUID of the characteristic
-
-**Returns:** Promise<Buffer>
-
-**Throws:**
-- `BLEDeviceError`: If characteristic is not found
-- `BLEError`: For other BLE-related errors
-
-#### writeCharacteristic(serviceUuid, characteristicUuid, data)
-Write data to a characteristic.
-
-```javascript
-await device.writeCharacteristic(
-  '180f',
-  '2a19',
-  Buffer.from([0x01])
-);
-```
-
-**Parameters:**
-- `serviceUuid` (string): UUID of the service
-- `characteristicUuid` (string): UUID of the characteristic
-- `data` (Buffer): Data to write
-
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEDeviceError`: If characteristic is not found
-- `BLEError`: For other BLE-related errors
-
-#### subscribeToCharacteristic(serviceUuid, characteristicUuid)
-Subscribe to characteristic notifications.
-
-```javascript
-await device.subscribeToCharacteristic(
-  '180f',
-  '2a19'
-);
-```
-
-**Parameters:**
-- `serviceUuid` (string): UUID of the service
-- `characteristicUuid` (string): UUID of the characteristic
-
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEDeviceError`: If characteristic is not found
-- `BLEError`: For other BLE-related errors
-
-#### unsubscribeFromCharacteristic(serviceUuid, characteristicUuid)
-Unsubscribe from characteristic notifications.
-
-```javascript
-await device.unsubscribeFromCharacteristic(
-  '180f',
-  '2a19'
-);
-```
-
-**Parameters:**
-- `serviceUuid` (string): UUID of the service
-- `characteristicUuid` (string): UUID of the characteristic
-
-**Returns:** Promise<void>
-
-**Throws:**
-- `BLEDeviceError`: If characteristic is not found
-- `BLEError`: For other BLE-related errors
-
-### Events
-
-#### characteristicValueChanged
-Emitted when a characteristic value changes.
-
-```javascript
-device.on('characteristicValueChanged', (serviceUuid, characteristicUuid, data) => {
-  console.log('Characteristic value changed:', {
-    service: serviceUuid,
-    characteristic: characteristicUuid,
-    data: data
-  });
-});
-```
-
-**Event Data:**
-- `serviceUuid` (string): UUID of the service
-- `characteristicUuid` (string): UUID of the characteristic
-- `data` (Buffer): New characteristic value
-
-#### disconnected
-Emitted when the device is disconnected.
-
-```javascript
-device.on('disconnected', () => {
-  console.log('Device disconnected');
-});
-```
-
-## Error Types
-
-### BLEError
-Base error class for all BLE-related errors.
-
-```javascript
-class BLEError extends Error {
-  constructor(message, code = 'BLE_ERROR');
+        ws.on('error', reject);
+    });
 }
-```
 
-### BLEDeviceError
-Error class for device-related errors.
+async function scanForDevices(ws) {
+    return new Promise((resolve, reject) => {
+        const devices = [];
 
-```javascript
-class BLEDeviceError extends BLEError {
-  constructor(message, deviceId);
+        // Start scanning
+        ws.send(JSON.stringify({
+            type: 'SCAN_START',
+            params: {
+                duration: 5
+            }
+        }));
+
+        // Handle device discovery
+        ws.on('message', (data) => {
+            const message = JSON.parse(data);
+            if (message.type === 'DEVICE_DISCOVERED') {
+                devices.push(message.params);
+            } else if (message.type === 'SCAN_STOPPED') {
+                resolve(devices);
+            } else if (message.type === 'ERROR') {
+                reject(new Error(message.message));
+            }
+        });
+    });
 }
-```
 
-### BLEScanError
-Error class for scanning-related errors.
-
-```javascript
-class BLEScanError extends BLEError {
-  constructor(message);
-}
-```
-
-### BLEConnectionError
-Error class for connection-related errors.
-
-```javascript
-class BLEConnectionError extends BLEError {
-  constructor(message, deviceId);
-}
-```
-
-## Usage Examples
-
-### Basic Device Discovery and Connection
-
-```javascript
-const { BLEService } = require('./src/ble/bleService');
-
+// Usage example
 async function main() {
-  const bleService = new BLEService();
-
-  try {
-    // Start scanning
-    await bleService.startScanning();
-
-    // Handle discovered devices
-    bleService.on('deviceDiscovered', (device) => {
-      console.log('Discovered:', device.name);
-    });
-
-    // Connect to a specific device
-    const device = await bleService.connectToDevice({
-      name: 'MyDevice',
-      alias: 'my-device'
-    });
-
-    // Handle device events
-    device.on('characteristicValueChanged', (serviceUuid, characteristicUuid, data) => {
-      console.log('Value changed:', data);
-    });
-
-  } catch (error) {
-    console.error('Error:', error);
-  } finally {
-    bleService.cleanup();
-  }
+    try {
+        // Connect and authenticate
+        const { ws, token } = await connectAndAuthenticate();
+        
+        // Scan for devices
+        const devices = await scanForDevices(ws);
+        console.log('Discovered devices:', devices);
+        
+        // Clean up
+        ws.send(JSON.stringify({ type: 'LOGOUT' }));
+        ws.close();
+    } catch (error) {
+        console.error('Error:', error);
+    }
 }
 
 main();
-```
-
-### Reading and Writing Characteristics
-
-```javascript
-async function handleDevice(device) {
-  try {
-    // Read battery level
-    const batteryData = await device.readCharacteristic(
-      '180f',
-      '2a19'
-    );
-    console.log('Battery level:', batteryData[0]);
-
-    // Write to a characteristic
-    await device.writeCharacteristic(
-      '180f',
-      '2a19',
-      Buffer.from([0x01])
-    );
-
-    // Subscribe to notifications
-    await device.subscribeToCharacteristic(
-      '180f',
-      '2a19'
-    );
-
-  } catch (error) {
-    console.error('Device error:', error);
-  }
-}
-```
-
-### Error Handling
-
-```javascript
-const { BLEError, BLEDeviceError, BLEScanError, BLEConnectionError } = require('./src/utils/bleErrors');
-
-async function handleBLE() {
-  try {
-    await bleService.startScanning();
-  } catch (error) {
-    if (error instanceof BLEScanError) {
-      console.error('Scanning failed:', error.message);
-    } else if (error instanceof BLEConnectionError) {
-      console.error('Connection failed:', error.message);
-    } else if (error instanceof BLEDeviceError) {
-      console.error('Device error:', error.message);
-    } else {
-      console.error('Unexpected error:', error.message);
-    }
-  }
-}
 ``` 

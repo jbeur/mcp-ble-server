@@ -3,7 +3,6 @@ const winston = require('winston');
 // Define log format
 const logFormat = winston.format.combine(
   winston.format.timestamp(),
-  winston.format.errors({ stack: true }),
   winston.format.json()
 );
 
@@ -14,10 +13,7 @@ const logger = winston.createLogger({
   transports: [
     // Console transport for development
     new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      )
+      format: winston.format.simple()
     }),
     // File transport for errors
     new winston.transports.File({

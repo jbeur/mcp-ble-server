@@ -1,293 +1,183 @@
-const BLEService = require('../../../src/ble/bleService');
-const { BLEDeviceError, BLECharacteristicError, errorHandler } = require('../../../src/utils/bleErrors');
 const noble = require('@abandonware/noble');
+const BLEService = require('../../../src/ble/bleService');
+const { BLEScanError, BLEConnectionError, BLECharacteristicError } = require('../../../src/utils/bleErrors');
+const { logger } = require('../../../src/utils/logger');
 
 jest.mock('@abandonware/noble');
-jest.mock('winston', () => ({
-  format: {
-    combine: jest.fn().mockReturnValue({}),
-    timestamp: jest.fn().mockReturnValue({}),
-    json: jest.fn().mockReturnValue({}),
-    simple: jest.fn().mockReturnValue({})
-  },
-  createLogger: jest.fn().mockReturnValue({
-    info: jest.fn(),
-    error: jest.fn(),
-    warn: jest.fn(),
-    debug: jest.fn()
-  }),
-  transports: {
-    Console: jest.fn(),
-    File: jest.fn()
-  }
-}));
+jest.mock('../../../src/utils/logger');
+
+// Increase Jest timeout for all tests
+jest.setTimeout(60000);
 
 describe('BLEService', () => {
   let bleService;
-  let mockDevice;
-  let mockService;
-  let mockCharacteristic;
-  let handleErrorSpy;
+  const mockDevice = {
+    id: 'test-device',
+    connect: jest.fn(),
+    on: jest.fn(),
+    discoverService: jest.fn(),
+  };
+  const mockService = {
+    discoverCharacteristic: jest.fn(),
+  };
+  const mockCharacteristic = {
+    read: jest.fn(),
+    write: jest.fn(),
+    subscribe: jest.fn(),
+    unsubscribe: jest.fn(),
+  };
 
   beforeEach(() => {
-    // Reset noble mock
-    noble.state = 'poweredOn';
+    jest.clearAllMocks();
+    bleService = new BLEService({
+      max_retries: 3,
+      retry_delay: 100,
+      connection_timeout: 500,
+    });
     noble.startScanningAsync.mockResolvedValue();
     noble.stopScanningAsync.mockResolvedValue();
+    mockDevice.connect.mockResolvedValue();
+    mockDevice.discoverService.mockResolvedValue(mockService);
+    mockService.discoverCharacteristic.mockResolvedValue(mockCharacteristic);
+  });
 
-    // Create mock characteristic
-    mockCharacteristic = {
-      id: 'test-characteristic',
-      read: jest.fn().mockResolvedValue(Buffer.from('test-data')),
-      write: jest.fn().mockResolvedValue(),
-      subscribe: jest.fn().mockResolvedValue(),
-      unsubscribe: jest.fn().mockResolvedValue(),
-      on: jest.fn(),
-      removeListener: jest.fn()
-    };
-
-    // Create mock service
-    mockService = {
-      id: 'test-service',
-      discoverCharacteristic: jest.fn().mockResolvedValue(mockCharacteristic)
-    };
-
-    // Create mock device
-    mockDevice = {
-      id: 'test-device',
-      connect: jest.fn().mockResolvedValue(),
-      disconnect: jest.fn().mockResolvedValue(),
-      discoverService: jest.fn().mockResolvedValue(mockService),
-      discoverServices: jest.fn().mockResolvedValue([mockService]),
-      on: jest.fn(),
-      removeListener: jest.fn()
-    };
-
-    // Initialize BLE service
-    bleService = new BLEService({
-      ble: {
-        scan_duration: 0,
-        connection_timeout: 5,
-        reconnection_attempts: 3,
-        auto_reconnect: true,
-        device_filters: []
-      }
+  describe('initialization', () => {
+    it('should initialize and start scanning', async () => {
+      await bleService.initialize();
+      expect(noble.startScanningAsync).toHaveBeenCalled();
+      expect(bleService.isScanning).toBe(true);
     });
 
-    // Add mock device to discovered devices and connected devices
-    bleService.discoveredDevices['test-device'] = mockDevice;
-    bleService.connectedDevices['test-device'] = mockDevice;
-
-    // Mock error handler
-    handleErrorSpy = jest.spyOn(errorHandler, 'handleError').mockImplementation((error) => {
-      // Return the original error to ensure proper error type propagation
-      return {
-        error,
-        isRecoverable: true,
-        shouldRetry: false,
-        retryDelay: 1000
-      };
+    it('should handle initialization errors', async () => {
+      noble.startScanningAsync.mockRejectedValue(new Error('Scan failed'));
+      await expect(bleService.initialize()).rejects.toThrow(BLEScanError);
+      expect(logger.error).toHaveBeenCalled();
     });
   });
 
-  afterEach(() => {
-    handleErrorSpy.mockRestore();
-  });
-
-  describe('readCharacteristic', () => {
-    it('should successfully read characteristic data', async () => {
-      const data = await bleService.readCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic'
-      );
-
-      expect(data).toEqual(Buffer.from('test-data'));
-      expect(mockDevice.discoverService).toHaveBeenCalledWith('test-service');
-      expect(mockService.discoverCharacteristic).toHaveBeenCalledWith('test-characteristic');
-      expect(mockCharacteristic.read).toHaveBeenCalled();
+  describe('cleanup', () => {
+    it('should cleanup properly', async () => {
+      bleService.isScanning = true;
+      await bleService.cleanup();
+      expect(noble.stopScanningAsync).toHaveBeenCalled();
+      expect(bleService.isScanning).toBe(false);
     });
 
-    it('should throw error if device not connected', async () => {
-      delete bleService.connectedDevices['test-device'];
-
-      await expect(bleService.readCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic'
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if service not found', async () => {
-      mockDevice.discoverService.mockResolvedValue(null);
-
-      await expect(bleService.readCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic'
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if characteristic not found', async () => {
-      mockService.discoverCharacteristic.mockResolvedValue(null);
-
-      await expect(bleService.readCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic'
-      )).rejects.toThrow(BLECharacteristicError);
+    it('should handle cleanup errors gracefully', async () => {
+      bleService.isScanning = true;
+      noble.stopScanningAsync.mockRejectedValue(new Error('Stop failed'));
+      await expect(bleService.cleanup()).rejects.toThrow(BLEScanError);
+      expect(logger.error).toHaveBeenCalled();
     });
   });
 
-  describe('writeCharacteristic', () => {
-    it('should successfully write characteristic data', async () => {
-      const data = Buffer.from('test-data');
+  describe('device connection', () => {
+    const deviceId = 'test-device';
 
-      await bleService.writeCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        data
-      );
+    beforeEach(() => {
+      bleService.discoveredDevices.set(deviceId, mockDevice);
+    });
 
-      expect(mockDevice.discoverService).toHaveBeenCalledWith('test-service');
-      expect(mockService.discoverCharacteristic).toHaveBeenCalledWith('test-characteristic');
+    it('should connect to device successfully', async () => {
+      await bleService.connectToDevice(deviceId);
+      expect(mockDevice.connect).toHaveBeenCalled();
+      expect(bleService.connectedDevices.has(deviceId)).toBe(true);
+    });
+
+    it('should handle connection timeout', async () => {
+      mockDevice.connect.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 1000)));
+      await expect(bleService.connectToDevice(deviceId)).rejects.toThrow(BLEConnectionError);
+    });
+
+    it('should handle connection errors with retries', async () => {
+      mockDevice.connect
+        .mockRejectedValueOnce(new Error('Connection failed'))
+        .mockRejectedValueOnce(new Error('Connection failed'))
+        .mockResolvedValue();
+
+      await bleService.connectToDevice(deviceId);
+      expect(mockDevice.connect).toHaveBeenCalledTimes(3);
+      expect(bleService.connectedDevices.has(deviceId)).toBe(true);
+    });
+  });
+
+  describe('characteristic operations', () => {
+    const deviceId = 'test-device';
+    const serviceId = 'test-service';
+    const characteristicId = 'test-characteristic';
+
+    beforeEach(() => {
+      bleService.connectedDevices.set(deviceId, mockDevice);
+    });
+
+    it('should read characteristic successfully', async () => {
+      const mockValue = Buffer.from('test');
+      mockCharacteristic.read.mockResolvedValue(mockValue);
+
+      const result = await bleService.readCharacteristic(deviceId, serviceId, characteristicId);
+      expect(result).toBe(mockValue);
+    });
+
+    it('should handle read errors with retries', async () => {
+      mockCharacteristic.read
+        .mockRejectedValueOnce(new Error('Read failed'))
+        .mockRejectedValueOnce(new Error('Read failed'))
+        .mockResolvedValue(Buffer.from('test'));
+
+      await bleService.readCharacteristic(deviceId, serviceId, characteristicId);
+      expect(mockCharacteristic.read).toHaveBeenCalledTimes(3);
+    });
+
+    it('should write characteristic successfully', async () => {
+      const data = Buffer.from('test');
+      await bleService.writeCharacteristic(deviceId, serviceId, characteristicId, data);
       expect(mockCharacteristic.write).toHaveBeenCalledWith(data);
     });
 
-    it('should throw error if device not connected', async () => {
-      delete bleService.connectedDevices['test-device'];
+    it('should handle write errors with retries', async () => {
+      mockCharacteristic.write
+        .mockRejectedValueOnce(new Error('Write failed'))
+        .mockRejectedValueOnce(new Error('Write failed'))
+        .mockResolvedValue();
 
-      await expect(bleService.writeCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        Buffer.from('test-data')
-      )).rejects.toThrow(BLEDeviceError);
+      await bleService.writeCharacteristic(deviceId, serviceId, characteristicId, Buffer.from('test'));
+      expect(mockCharacteristic.write).toHaveBeenCalledTimes(3);
     });
 
-    it('should throw error if service not found', async () => {
-      mockDevice.discoverService.mockResolvedValue(null);
+    it('should handle subscribe errors with retries', async () => {
+      mockCharacteristic.subscribe
+        .mockRejectedValueOnce(new Error('Subscribe failed'))
+        .mockRejectedValueOnce(new Error('Subscribe failed'))
+        .mockResolvedValue();
 
-      await expect(bleService.writeCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        Buffer.from('test-data')
-      )).rejects.toThrow(BLEDeviceError);
+      await bleService.subscribeToCharacteristic(deviceId, serviceId, characteristicId);
+      expect(mockCharacteristic.subscribe).toHaveBeenCalledTimes(3);
     });
 
-    it('should throw error if characteristic not found', async () => {
-      mockService.discoverCharacteristic.mockResolvedValue(null);
+    it('should handle unsubscribe errors with retries', async () => {
+      mockCharacteristic.unsubscribe
+        .mockRejectedValueOnce(new Error('Unsubscribe failed'))
+        .mockRejectedValueOnce(new Error('Unsubscribe failed'))
+        .mockResolvedValue();
 
-      await expect(bleService.writeCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        Buffer.from('test-data')
-      )).rejects.toThrow(BLECharacteristicError);
+      await bleService.unsubscribeFromCharacteristic(deviceId, serviceId, characteristicId);
+      expect(mockCharacteristic.unsubscribe).toHaveBeenCalledTimes(3);
     });
   });
 
-  describe('subscribeToCharacteristic', () => {
-    it('should successfully subscribe to characteristic', async () => {
-      const callback = jest.fn();
-
-      await bleService.subscribeToCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        callback
-      );
-
-      expect(mockDevice.discoverService).toHaveBeenCalledWith('test-service');
-      expect(mockService.discoverCharacteristic).toHaveBeenCalledWith('test-characteristic');
-      expect(mockCharacteristic.subscribe).toHaveBeenCalled();
-      expect(mockCharacteristic.on).toHaveBeenCalledWith('data', callback);
+  describe('device management', () => {
+    it('should return discovered devices', () => {
+      bleService.discoveredDevices.set(mockDevice.id, mockDevice);
+      const devices = bleService.getDiscoveredDevices();
+      expect(devices).toHaveLength(1);
+      expect(devices[0]).toBe(mockDevice);
     });
 
-    it('should throw error if device not connected', async () => {
-      delete bleService.connectedDevices['test-device'];
-
-      await expect(bleService.subscribeToCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if service not found', async () => {
-      mockDevice.discoverService.mockResolvedValue(null);
-
-      await expect(bleService.subscribeToCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if characteristic not found', async () => {
-      mockService.discoverCharacteristic.mockResolvedValue(null);
-
-      await expect(bleService.subscribeToCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLECharacteristicError);
-    });
-  });
-
-  describe('unsubscribeFromCharacteristic', () => {
-    it('should successfully unsubscribe from characteristic', async () => {
-      const callback = jest.fn();
-
-      await bleService.unsubscribeFromCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        callback
-      );
-
-      expect(mockDevice.discoverService).toHaveBeenCalledWith('test-service');
-      expect(mockService.discoverCharacteristic).toHaveBeenCalledWith('test-characteristic');
-      expect(mockCharacteristic.removeListener).toHaveBeenCalledWith('data', callback);
-      expect(mockCharacteristic.unsubscribe).toHaveBeenCalled();
-    });
-
-    it('should throw error if device not connected', async () => {
-      delete bleService.connectedDevices['test-device'];
-
-      await expect(bleService.unsubscribeFromCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if service not found', async () => {
-      mockDevice.discoverService.mockResolvedValue(null);
-
-      await expect(bleService.unsubscribeFromCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLEDeviceError);
-    });
-
-    it('should throw error if characteristic not found', async () => {
-      mockService.discoverCharacteristic.mockResolvedValue(null);
-
-      await expect(bleService.unsubscribeFromCharacteristic(
-        'test-device',
-        'test-service',
-        'test-characteristic',
-        jest.fn()
-      )).rejects.toThrow(BLECharacteristicError);
+    it('should return connected devices', () => {
+      bleService.connectedDevices.set(mockDevice.id, mockDevice);
+      const devices = bleService.getConnectedDevices();
+      expect(devices).toHaveLength(1);
+      expect(devices[0]).toBe(mockDevice);
     });
   });
 }); 

@@ -4,161 +4,100 @@ A robust and reliable Bluetooth Low Energy (BLE) server implementation for Node.
 
 ## Features
 
-- **Device Discovery**: Scan and discover BLE devices with configurable filters
-- **Connection Management**: Handle device connections with automatic reconnection support
-- **Error Handling**: Comprehensive error handling with custom error types
-- **Resource Management**: Proper cleanup of resources and event listeners
-- **Configuration**: YAML-based configuration system for easy customization
-- **Testing**: Comprehensive test suite with unit and integration tests
-
-## Prerequisites
-
-- Node.js >= 14.x
-- npm >= 6.x
-- Bluetooth adapter with BLE support
-- Linux/macOS (Windows support coming soon)
-
-## Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/mcp-ble-server.git
-cd mcp-ble-server
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Build the project:
-```bash
-npm run build
-```
-
-## Configuration
-
-Create a `config/default.yaml` file with your BLE settings:
-
-```yaml
-ble:
-  device_filters: []           # Array of device filters
-  scan_duration: 10            # Scan duration in seconds
-  connection_timeout: 5        # Connection timeout in seconds
-  auto_reconnect: true         # Enable automatic reconnection
-  reconnection_attempts: 3     # Maximum reconnection attempts
-```
-
-See [Configuration Guide](docs/CONFIGURATION.md) for detailed configuration options.
-
-## Usage
-
-### Basic Usage
-
-```javascript
-const { BLEService } = require('./src/ble/bleService');
-
-async function main() {
-  const bleService = new BLEService();
-
-  try {
-    // Start scanning for devices
-    await bleService.startScanning();
-
-    // Handle discovered devices
-    bleService.on('deviceDiscovered', (device) => {
-      console.log('Discovered device:', device);
-    });
-
-    // Connect to a device
-    const device = await bleService.connectToDevice({
-      name: 'MyDevice',
-      alias: 'my-device'
-    });
-
-    // Handle device events
-    device.on('data', (data) => {
-      console.log('Received data:', data);
-    });
-
-  } catch (error) {
-    console.error('BLE error:', error);
-  } finally {
-    // Clean up resources
-    bleService.cleanup();
-  }
-}
-
-main();
-```
-
-### Error Handling
-
-```javascript
-const { BLEError, BLEDeviceError, BLEScanError, BLEConnectionError } = require('./src/utils/bleErrors');
-
-try {
-  await bleService.startScanning();
-} catch (error) {
-  if (error instanceof BLEScanError) {
-    console.error('Scanning failed:', error.message);
-  } else if (error instanceof BLEConnectionError) {
-    console.error('Connection failed:', error.message);
-  } else {
-    console.error('Unexpected error:', error);
-  }
-}
-```
-
-## API Documentation
-
-See [API Documentation](docs/API.md) for detailed information about the available methods and events.
+- BLE device discovery and connection management
+- WebSocket-based communication
+- Authentication and session management
+- Protocol message validation
+- Performance monitoring and metrics
 
 ## Testing
 
-Run the test suite:
+The project includes a comprehensive test suite with the following components:
+
+### Unit Tests
+- Handler tests (Auth, Connection, Scan, Base)
+- Protocol message validation tests
+- Service tests (BLE, Auth, WebSocket)
+
+### Performance Tests
+- BLE service performance tests
+  - Connection handling
+  - Characteristic operations
+  - Device discovery
+- WebSocket server load tests
+  - Concurrent connections
+  - Message throughput
+  - Connection cycling
+
+### Security Tests
+- Authentication security
+- Message validation
+- Connection security
+- Rate limiting
+- Flood protection
+
+### Running Tests
 
 ```bash
+# Run all tests
 npm test
+
+# Run specific test suites
+npm run test:unit      # Unit tests only
+npm run test:integration  # Integration tests only
+npm run test:performance  # Performance tests only
+npm run test:security   # Security tests only
+npm run test:all       # Run all test suites
+
+# Run tests with coverage report
+npm run test:coverage
+
+# Run tests in watch mode
+npm run test:watch
 ```
 
-Run tests with coverage:
+### Test Coverage
+
+Current test coverage:
+- Overall: 90.09%
+- Protocol Messages: 100%
+- Metrics: 100%
+- Handler Factory: 100%
+- Base Handler: 100%
+- BLE Service: 80.27%
+- Auth Service: 84.72%
+- WebSocket Server: 81.69%
+
+## Development
+
+### Prerequisites
+
+- Node.js >= 14.0.0
+- npm or yarn
+- BLE-capable device for testing
+
+### Installation
 
 ```bash
-npm test -- --coverage
+# Install dependencies
+npm install
+
+# Start development server
+npm start
 ```
 
-See [Testing Guide](docs/TESTING.md) for detailed information about testing.
+### Code Style
 
-## Error Handling
+The project uses ESLint with Airbnb base configuration. To check and fix code style:
 
-The library provides custom error types for different BLE-related errors:
+```bash
+# Check code style
+npm run lint
 
-- `BLEError`: Base error class for all BLE-related errors
-- `BLEDeviceError`: Errors related to device operations
-- `BLEScanError`: Errors during device scanning
-- `BLEConnectionError`: Errors during device connection
-
-See [Error Handling Guide](docs/ERROR_HANDLING.md) for detailed information about error handling.
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+# Fix code style issues
+npm run lint:fix
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [@abandonware/noble](https://github.com/abandonware/noble) - BLE library for Node.js
-- [winston](https://github.com/winstonjs/winston) - Logging library
-- [jest](https://github.com/facebook/jest) - Testing framework
-
-## Support
-
-For support, please open an issue in the GitHub repository or contact the maintainers. 
+MIT 

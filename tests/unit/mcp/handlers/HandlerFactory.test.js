@@ -1,21 +1,7 @@
+const { MESSAGE_TYPES } = require('../../../../src/mcp/protocol/messages');
 const { HandlerFactory } = require('../../../../src/mcp/handlers/HandlerFactory');
-const { ScanHandler } = require('../../../../src/mcp/handlers/ScanHandler');
-const { ConnectionHandler } = require('../../../../src/mcp/handlers/ConnectionHandler');
 const { logger } = require('../../../../src/utils/logger');
 const { metrics } = require('../../../../src/utils/metrics');
-
-// Mock message types and error codes
-jest.mock('../../../../src/mcp/protocol/messages', () => ({
-    MESSAGE_TYPES: {
-        START_SCAN: 'START_SCAN',
-        STOP_SCAN: 'STOP_SCAN',
-        CONNECT: 'CONNECT',
-        DISCONNECT: 'DISCONNECT'
-    },
-    ERROR_CODES: {
-        INVALID_MESSAGE_TYPE: 'INVALID_MESSAGE_TYPE'
-    }
-}));
 
 // Mock dependencies
 jest.mock('../../../../src/utils/logger');
@@ -24,173 +10,174 @@ jest.mock('../../../../src/utils/metrics', () => ({
         increment: jest.fn()
     }
 }));
-jest.mock('../../../../src/ble/BLEService', () => {
-    return {
-        BLEService: jest.fn().mockImplementation(() => ({
-            startScan: jest.fn().mockResolvedValue(undefined),
-            stopScan: jest.fn().mockResolvedValue(undefined),
-            connect: jest.fn().mockResolvedValue(undefined),
-            disconnect: jest.fn().mockResolvedValue(undefined),
-            on: jest.fn(),
-            removeListener: jest.fn()
-        }))
-    };
+
+// Mock handler classes
+const mockAuthHandler = {
+    handleMessage: jest.fn(),
+    handleClientDisconnect: jest.fn().mockResolvedValue(undefined)
+};
+
+const mockScanHandler = {
+    handleMessage: jest.fn(),
+    handleClientDisconnect: jest.fn().mockResolvedValue(undefined)
+};
+
+const mockConnectionHandler = {
+    handleMessage: jest.fn(),
+    handleClientDisconnect: jest.fn().mockResolvedValue(undefined)
+};
+
+jest.mock('../../../../src/mcp/handlers/AuthHandler', () => ({
+    AuthHandler: jest.fn(() => mockAuthHandler)
+}));
+
+jest.mock('../../../../src/mcp/handlers/ScanHandler', () => ({
+    ScanHandler: jest.fn(() => mockScanHandler)
+}));
+
+jest.mock('../../../../src/mcp/handlers/ConnectionHandler', () => ({
+    ConnectionHandler: jest.fn(() => mockConnectionHandler)
+}));
+
+// Mock BLEService
+jest.mock('../../../../src/ble/bleService', () => {
+    return jest.fn().mockImplementation(() => ({
+        startScan: jest.fn().mockResolvedValue(undefined),
+        stopScan: jest.fn().mockResolvedValue(undefined),
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        on: jest.fn(),
+        removeListener: jest.fn(),
+        discoveredDevices: new Map(),
+        connectedDevices: new Map()
+    }));
 });
 
-// Mock handlers
-jest.mock('../../../../src/mcp/handlers/ScanHandler');
-jest.mock('../../../../src/mcp/handlers/ConnectionHandler');
-
-const { BLEService } = require('../../../../src/ble/BLEService');
-const { MESSAGE_TYPES } = require('../../../../src/mcp/protocol/messages');
-
 describe('HandlerFactory', () => {
-    let factory;
-    let bleService;
-    const clientId = 'test-client-1';
-    const deviceId = 'test-device-1';
+    let handlerFactory;
+    let mockAuthService;
+    let mockBleService;
+    let AuthHandler;
+    let ScanHandler;
+    let ConnectionHandler;
 
     beforeEach(() => {
+        mockAuthService = {
+            validateSession: jest.fn(),
+            activeSessions: new Map()
+        };
+
+        mockBleService = {
+            startScan: jest.fn(),
+            stopScan: jest.fn(),
+            connect: jest.fn(),
+            disconnect: jest.fn()
+        };
+
+        // Get the mocked classes
+        AuthHandler = require('../../../../src/mcp/handlers/AuthHandler').AuthHandler;
+        ScanHandler = require('../../../../src/mcp/handlers/ScanHandler').ScanHandler;
+        ConnectionHandler = require('../../../../src/mcp/handlers/ConnectionHandler').ConnectionHandler;
+
         // Reset all mocks
         jest.clearAllMocks();
-        
-        // Create fresh instances
-        bleService = new BLEService();
-        factory = new HandlerFactory(bleService);
+
+        handlerFactory = new HandlerFactory(mockAuthService, mockBleService);
     });
 
     describe('initializeHandlers', () => {
         it('should initialize all required handlers', () => {
-            expect(ScanHandler).toHaveBeenCalledTimes(2);
-            expect(ConnectionHandler).toHaveBeenCalledTimes(2);
-            
-            // Verify handler mapping
-            expect(factory.handlers.get(MESSAGE_TYPES.START_SCAN)).toBeDefined();
-            expect(factory.handlers.get(MESSAGE_TYPES.STOP_SCAN)).toBeDefined();
-            expect(factory.handlers.get(MESSAGE_TYPES.CONNECT)).toBeDefined();
-            expect(factory.handlers.get(MESSAGE_TYPES.DISCONNECT)).toBeDefined();
+            expect(AuthHandler).toHaveBeenCalledWith(mockAuthService);
+            expect(ScanHandler).toHaveBeenCalledWith(mockBleService);
+            expect(ConnectionHandler).toHaveBeenCalledWith(mockBleService);
+
+            expect(handlerFactory.handlers.get(MESSAGE_TYPES.AUTHENTICATE)).toBe(mockAuthHandler);
+            expect(handlerFactory.handlers.get(MESSAGE_TYPES.START_SCAN)).toBe(mockScanHandler);
+            expect(handlerFactory.handlers.get(MESSAGE_TYPES.CONNECT)).toBe(mockConnectionHandler);
+
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.init.success');
+        });
+
+        it('should handle initialization errors', () => {
+            const error = new Error('Init error');
+            AuthHandler.mockImplementationOnce(() => {
+                throw error;
+            });
+
+            expect(() => {
+                new HandlerFactory(mockAuthService, mockBleService);
+            }).toThrow(error);
+
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.init.error');
         });
     });
 
     describe('getHandler', () => {
         it('should return handler for valid message type', () => {
-            const handler = factory.getHandler(MESSAGE_TYPES.START_SCAN);
-            expect(handler).toBeDefined();
-            expect(handler instanceof ScanHandler).toBe(true);
+            const handler = handlerFactory.getHandler(MESSAGE_TYPES.AUTHENTICATE);
+            expect(handler).toBe(mockAuthHandler);
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.get_handler.success');
         });
 
         it('should throw error for invalid message type', () => {
-            expect(() => factory.getHandler('INVALID_TYPE'))
-                .toThrow('Unsupported message type: INVALID_TYPE');
-            
-            expect(metrics.increment).toHaveBeenCalledWith('handler.not_found');
-            expect(logger.error).toHaveBeenCalledWith(
-                'No handler found for message type: INVALID_TYPE'
-            );
+            expect(() => {
+                handlerFactory.getHandler('INVALID_TYPE');
+            }).toThrow('No handler found for message type: INVALID_TYPE');
+
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.get_handler.not_found');
         });
     });
 
     describe('handleMessage', () => {
+        const clientId = 'test-client';
+
         it('should handle valid message', async () => {
-            const message = {
-                type: MESSAGE_TYPES.START_SCAN,
-                params: { timeout: 5000 }
-            };
-
-            // Mock handler's handleMessage method
-            const mockHandler = {
-                handleMessage: jest.fn().mockResolvedValue(undefined)
-            };
-            factory.handlers.set(MESSAGE_TYPES.START_SCAN, mockHandler);
-
-            await factory.handleMessage(clientId, message);
-
-            expect(mockHandler.handleMessage).toHaveBeenCalledWith(clientId, message);
-            expect(metrics.increment).toHaveBeenCalledWith('message.handle.success');
+            const message = { type: MESSAGE_TYPES.AUTHENTICATE, data: {} };
+            await handlerFactory.handleMessage(clientId, message);
+            expect(mockAuthHandler.handleMessage).toHaveBeenCalledWith(clientId, message);
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.handle_message.success');
         });
 
         it('should handle invalid message format', async () => {
-            const message = {};
+            await expect(handlerFactory.handleMessage(clientId, null))
+                .rejects.toThrow('Invalid message format');
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.handle_message.invalid_format');
 
-            await expect(factory.handleMessage(clientId, message))
-                .rejects
-                .toThrow('Invalid message format');
-            
-            expect(metrics.increment).toHaveBeenCalledWith('message.handle.error');
-            expect(logger.error).toHaveBeenCalledWith(
-                `Error handling message for client ${clientId}`,
-                expect.any(Object)
-            );
+            await expect(handlerFactory.handleMessage(clientId, {}))
+                .rejects.toThrow('Invalid message format: missing or invalid type');
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.handle_message.missing_type');
         });
 
         it('should handle handler errors', async () => {
-            const message = {
-                type: MESSAGE_TYPES.START_SCAN,
-                params: { timeout: 5000 }
-            };
+            const message = { type: MESSAGE_TYPES.AUTHENTICATE, data: {} };
+            const error = new Error('Handler error');
+            mockAuthHandler.handleMessage.mockRejectedValue(error);
 
-            // Mock handler's handleMessage method to throw error
-            const mockHandler = {
-                handleMessage: jest.fn().mockRejectedValue(new Error('Handler error'))
-            };
-            factory.handlers.set(MESSAGE_TYPES.START_SCAN, mockHandler);
-
-            await expect(factory.handleMessage(clientId, message))
-                .rejects
-                .toThrow('Handler error');
-            
-            expect(metrics.increment).toHaveBeenCalledWith('message.handle.error');
-            expect(logger.error).toHaveBeenCalledWith(
-                `Error handling message for client ${clientId}`,
-                expect.any(Object)
-            );
+            await expect(handlerFactory.handleMessage(clientId, message))
+                .rejects.toThrow(error);
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.handle_message.error');
         });
     });
 
     describe('handleClientDisconnect', () => {
-        it('should notify all handlers about client disconnect', () => {
-            // Mock handlers
-            const mockScanHandler = {
-                handleClientDisconnect: jest.fn()
-            };
-            const mockConnectionHandler = {
-                handleClientDisconnect: jest.fn()
-            };
+        const clientId = 'test-client';
 
-            factory.handlers.set(MESSAGE_TYPES.START_SCAN, mockScanHandler);
-            factory.handlers.set(MESSAGE_TYPES.CONNECT, mockConnectionHandler);
+        it('should notify all handlers about client disconnect', async () => {
+            await handlerFactory.handleClientDisconnect(clientId);
 
-            factory.handleClientDisconnect(clientId);
-
+            expect(mockAuthHandler.handleClientDisconnect).toHaveBeenCalledWith(clientId);
             expect(mockScanHandler.handleClientDisconnect).toHaveBeenCalledWith(clientId);
             expect(mockConnectionHandler.handleClientDisconnect).toHaveBeenCalledWith(clientId);
-            expect(logger.debug).toHaveBeenCalledWith(
-                `Handling client disconnect: ${clientId}`
-            );
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.client_disconnect.success');
         });
 
-        it('should handle handler cleanup errors', () => {
-            // Mock handlers
-            const mockScanHandler = {
-                handleClientDisconnect: jest.fn().mockImplementation(() => {
-                    throw new Error('Cleanup error');
-                })
-            };
-            const mockConnectionHandler = {
-                handleClientDisconnect: jest.fn()
-            };
+        it('should handle handler cleanup errors', async () => {
+            const error = new Error('Cleanup error');
+            mockAuthHandler.handleClientDisconnect.mockRejectedValueOnce(error);
 
-            factory.handlers.set(MESSAGE_TYPES.START_SCAN, mockScanHandler);
-            factory.handlers.set(MESSAGE_TYPES.CONNECT, mockConnectionHandler);
-
-            factory.handleClientDisconnect(clientId);
-
-            expect(mockScanHandler.handleClientDisconnect).toHaveBeenCalledWith(clientId);
-            expect(mockConnectionHandler.handleClientDisconnect).toHaveBeenCalledWith(clientId);
-            expect(logger.error).toHaveBeenCalledWith(
-                `Error in handler cleanup for client ${clientId}`,
-                expect.any(Object)
-            );
+            await expect(handlerFactory.handleClientDisconnect(clientId))
+                .rejects.toThrow('Failed to disconnect client: 1 handlers reported errors');
+            expect(metrics.increment).toHaveBeenCalledWith('handler_factory.client_disconnect.error');
         });
     });
 }); 

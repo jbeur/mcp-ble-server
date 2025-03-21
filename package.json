@@ -8,12 +8,21 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration",
+    "test:performance": "jest tests/performance",
+    "test:security": "jest tests/performance/security.test.js",
+    "test:all": "jest tests/unit && jest tests/integration && jest tests/performance",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "@abandonware/noble": "^1.9.2-26",
+    "autocannon": "^7.15.0",
+    "jsonwebtoken": "^9.0.2",
     "prom-client": "^15.1.0",
+    "supertest": "^6.3.4",
+    "uuid": "^11.1.0",
     "winston": "^3.11.0",
     "ws": "^8.16.0",
     "yaml": "^2.3.4"
@@ -22,7 +31,8 @@
     "eslint": "^8.56.0",
     "eslint-config-airbnb-base": "^15.0.0",
     "eslint-plugin-import": "^2.29.1",
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "jest-extended": "^4.0.2"
   },
   "engines": {
     "node": ">=14.0.0"

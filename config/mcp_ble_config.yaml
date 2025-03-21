@@ -8,6 +8,10 @@ server:
     api_keys:        # List of valid API keys
       - "key1"
       - "key2"
+    jwt_secret: "your-secret-key-here"  # Secret key for JWT signing
+    session_timeout: 86400000  # Session timeout in milliseconds (24 hours)
+    rate_limit_window: 60000   # Rate limit window in milliseconds (1 minute)
+    rate_limit_max: 100        # Maximum requests per window
 
 # BLE Configuration
 ble:

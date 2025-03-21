@@ -2,6 +2,9 @@ const winston = require('winston');
 const path = require('path');
 const ConfigLoader = require('./config/configLoader');
 const BLEService = require('./ble/bleService');
+const AuthService = require('./auth/AuthService');
+const WebSocketServer = require('./websocket/WebSocketServer');
+const HandlerFactory = require('./mcp/handlers/HandlerFactory');
 
 // Initialize configuration loader
 const configLoader = new ConfigLoader();
@@ -28,8 +31,20 @@ const logger = winston.createLogger({
     ]
 });
 
-// Initialize BLE service
+// Initialize services
 const bleService = new BLEService(config);
+const authService = new AuthService(config);
+
+// Initialize WebSocket server with handler factory
+const handlerFactory = new HandlerFactory(bleService, authService);
+const wsServer = new WebSocketServer(config, handlerFactory);
+
+// Set up session cleanup interval
+const SESSION_CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+setInterval(() => {
+    authService.cleanupExpiredSessions()
+        .catch(error => logger.error('Error cleaning up expired sessions', { error }));
+}, SESSION_CLEANUP_INTERVAL);
 
 // Main server initialization
 async function initializeServer() {
@@ -38,6 +53,9 @@ async function initializeServer() {
         
         // Initialize BLE service
         await bleService.initialize();
+        
+        // Start WebSocket server
+        await wsServer.start();
         
         logger.info('MCP BLE Server initialized successfully');
     } catch (error) {
@@ -58,20 +76,13 @@ process.on('unhandledRejection', (reason, promise) => {
     process.exit(1);
 });
 
-// Handle graceful shutdown
+// Handle process termination
 process.on('SIGTERM', async () => {
-    logger.info('Received SIGTERM signal. Shutting down gracefully...');
+    logger.info('Received SIGTERM signal. Shutting down...');
     try {
-        // Stop configuration file watching
-        configLoader.stopWatching();
-        
-        // Disconnect all BLE devices
-        const connectedDevices = bleService.getConnectedDevices();
-        for (const device of connectedDevices) {
-            await bleService.disconnectDevice(device.id);
-        }
-        
-        logger.info('Server shutdown completed successfully');
+        await bleService.cleanup();
+        await wsServer.stop();
+        logger.info('Server shutdown complete');
         process.exit(0);
     } catch (error) {
         logger.error('Error during server shutdown:', error);
