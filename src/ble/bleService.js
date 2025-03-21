@@ -1,6 +1,6 @@
 const noble = require('@abandonware/noble');
 const winston = require('winston');
-const { BLEDeviceError, BLEScanError, BLEConnectionError, errorHandler } = require('../utils/bleErrors');
+const { BLEDeviceError, BLEScanError, BLEConnectionError, BLECharacteristicError, errorHandler } = require('../utils/bleErrors');
 
 class BLEService {
   constructor(config) {
@@ -303,6 +303,189 @@ class BLEService {
 
   getConnectedDevices() {
     return Object.values(this.connectedDevices);
+  }
+
+  async readCharacteristic(deviceId, serviceId, characteristicId) {
+    const device = this.connectedDevices[deviceId];
+    if (!device) {
+      throw new BLEDeviceError('Device not connected', deviceId);
+    }
+
+    try {
+      const service = await device.discoverService(serviceId);
+      if (!service) {
+        throw new BLEDeviceError('Service not found', deviceId);
+      }
+
+      const characteristic = await service.discoverCharacteristic(characteristicId);
+      if (!characteristic) {
+        throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
+      }
+
+      const data = await characteristic.read();
+      return data;
+    } catch (error) {
+      // If the error is already a BLEDeviceError or BLECharacteristicError, pass it through
+      if (error instanceof BLEDeviceError || error instanceof BLECharacteristicError) {
+        const { error: handledError, shouldRetry, retryDelay } = 
+          errorHandler.handleError(error);
+        
+        if (shouldRetry) {
+          this.logger.info(`Retrying characteristic read in ${retryDelay}ms`);
+          this.setRetryTimeout(`read-char-${deviceId}-${characteristicId}`, () => this.readCharacteristic(deviceId, serviceId, characteristicId), retryDelay);
+        }
+        
+        throw handledError;
+      }
+
+      // Otherwise, wrap it in a BLECharacteristicError
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(new BLECharacteristicError('Failed to read characteristic', deviceId, characteristicId, { error }));
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying characteristic read in ${retryDelay}ms`);
+        this.setRetryTimeout(`read-char-${deviceId}-${characteristicId}`, () => this.readCharacteristic(deviceId, serviceId, characteristicId), retryDelay);
+      }
+      
+      throw handledError;
+    }
+  }
+
+  async writeCharacteristic(deviceId, serviceId, characteristicId, data) {
+    const device = this.connectedDevices[deviceId];
+    if (!device) {
+      throw new BLEDeviceError('Device not connected', deviceId);
+    }
+
+    try {
+      const service = await device.discoverService(serviceId);
+      if (!service) {
+        throw new BLEDeviceError('Service not found', deviceId);
+      }
+
+      const characteristic = await service.discoverCharacteristic(characteristicId);
+      if (!characteristic) {
+        throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
+      }
+
+      await characteristic.write(data);
+    } catch (error) {
+      // If the error is already a BLEDeviceError or BLECharacteristicError, pass it through
+      if (error instanceof BLEDeviceError || error instanceof BLECharacteristicError) {
+        const { error: handledError, shouldRetry, retryDelay } = 
+          errorHandler.handleError(error);
+        
+        if (shouldRetry) {
+          this.logger.info(`Retrying characteristic write in ${retryDelay}ms`);
+          this.setRetryTimeout(`write-char-${deviceId}-${characteristicId}`, () => this.writeCharacteristic(deviceId, serviceId, characteristicId, data), retryDelay);
+        }
+        
+        throw handledError;
+      }
+
+      // Otherwise, wrap it in a BLECharacteristicError
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(new BLECharacteristicError('Failed to write characteristic', deviceId, characteristicId, { error }));
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying characteristic write in ${retryDelay}ms`);
+        this.setRetryTimeout(`write-char-${deviceId}-${characteristicId}`, () => this.writeCharacteristic(deviceId, serviceId, characteristicId, data), retryDelay);
+      }
+      
+      throw handledError;
+    }
+  }
+
+  async subscribeToCharacteristic(deviceId, serviceId, characteristicId, callback) {
+    const device = this.connectedDevices[deviceId];
+    if (!device) {
+      throw new BLEDeviceError('Device not connected', deviceId);
+    }
+
+    try {
+      const service = await device.discoverService(serviceId);
+      if (!service) {
+        throw new BLEDeviceError('Service not found', deviceId);
+      }
+
+      const characteristic = await service.discoverCharacteristic(characteristicId);
+      if (!characteristic) {
+        throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
+      }
+
+      await characteristic.subscribe();
+      characteristic.on('data', callback);
+    } catch (error) {
+      // If the error is already a BLEDeviceError or BLECharacteristicError, pass it through
+      if (error instanceof BLEDeviceError || error instanceof BLECharacteristicError) {
+        const { error: handledError, shouldRetry, retryDelay } = 
+          errorHandler.handleError(error);
+        
+        if (shouldRetry) {
+          this.logger.info(`Retrying characteristic subscription in ${retryDelay}ms`);
+          this.setRetryTimeout(`subscribe-char-${deviceId}-${characteristicId}`, () => this.subscribeToCharacteristic(deviceId, serviceId, characteristicId, callback), retryDelay);
+        }
+        
+        throw handledError;
+      }
+
+      // Otherwise, wrap it in a BLECharacteristicError
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(new BLECharacteristicError('Failed to subscribe to characteristic', deviceId, characteristicId, { error }));
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying characteristic subscription in ${retryDelay}ms`);
+        this.setRetryTimeout(`subscribe-char-${deviceId}-${characteristicId}`, () => this.subscribeToCharacteristic(deviceId, serviceId, characteristicId, callback), retryDelay);
+      }
+      
+      throw handledError;
+    }
+  }
+
+  async unsubscribeFromCharacteristic(deviceId, serviceId, characteristicId, callback) {
+    const device = this.connectedDevices[deviceId];
+    if (!device) {
+      throw new BLEDeviceError('Device not connected', deviceId);
+    }
+
+    try {
+      const service = await device.discoverService(serviceId);
+      if (!service) {
+        throw new BLEDeviceError('Service not found', deviceId);
+      }
+
+      const characteristic = await service.discoverCharacteristic(characteristicId);
+      if (!characteristic) {
+        throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
+      }
+
+      characteristic.removeListener('data', callback);
+      await characteristic.unsubscribe();
+    } catch (error) {
+      // If the error is already a BLEDeviceError or BLECharacteristicError, pass it through
+      if (error instanceof BLEDeviceError || error instanceof BLECharacteristicError) {
+        const { error: handledError, shouldRetry, retryDelay } = 
+          errorHandler.handleError(error);
+        
+        if (shouldRetry) {
+          this.logger.info(`Retrying characteristic unsubscription in ${retryDelay}ms`);
+          this.setRetryTimeout(`unsubscribe-char-${deviceId}-${characteristicId}`, () => this.unsubscribeFromCharacteristic(deviceId, serviceId, characteristicId, callback), retryDelay);
+        }
+        
+        throw handledError;
+      }
+
+      // Otherwise, wrap it in a BLECharacteristicError
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(new BLECharacteristicError('Failed to unsubscribe from characteristic', deviceId, characteristicId, { error }));
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying characteristic unsubscription in ${retryDelay}ms`);
+        this.setRetryTimeout(`unsubscribe-char-${deviceId}-${characteristicId}`, () => this.unsubscribeFromCharacteristic(deviceId, serviceId, characteristicId, callback), retryDelay);
+      }
+      
+      throw handledError;
+    }
   }
 }
 

@@ -32,6 +32,15 @@ class BLEConnectionError extends BLEError {
     }
 }
 
+class BLECharacteristicError extends BLEError {
+    constructor(message, deviceId, characteristicId) {
+        super(message, 'CHARACTERISTIC_ERROR');
+        this.name = 'BLECharacteristicError';
+        this.deviceId = deviceId;
+        this.characteristicId = characteristicId;
+    }
+}
+
 // Error handling utilities
 const errorHandler = {
     logger: winston.createLogger({
@@ -74,7 +83,8 @@ const errorHandler = {
         const recoverableCodes = [
             'CONNECTION_ERROR',
             'SCAN_ERROR',
-            'DEVICE_ERROR'
+            'DEVICE_ERROR',
+            'CHARACTERISTIC_ERROR'
         ];
 
         return recoverableCodes.includes(error.code);
@@ -88,6 +98,9 @@ const errorHandler = {
         if (error instanceof BLEScanError) {
             return true; // Always retry scan errors
         }
+        if (error instanceof BLECharacteristicError) {
+            return true; // Always retry characteristic errors
+        }
         return false;
     },
 
@@ -99,6 +112,9 @@ const errorHandler = {
         if (error instanceof BLEScanError) {
             return 1000; // 1 second for scan errors
         }
+        if (error instanceof BLECharacteristicError) {
+            return 1500; // 1.5 seconds for characteristic errors
+        }
         return 5000; // Default 5 seconds
     }
 };
@@ -108,5 +124,6 @@ module.exports = {
     BLEDeviceError,
     BLEScanError,
     BLEConnectionError,
+    BLECharacteristicError,
     errorHandler
 }; 

@@ -1,31 +1,28 @@
 # MCP BLE Server
 
-A Node.js-based MCP (Message Control Protocol) server that supports Bluetooth Low Energy (BLE) connectivity.
-
-## Project Overview
-
-This project implements an MCP server with BLE support, allowing for wireless communication with compatible devices. The server handles message routing, device management, and BLE protocol implementation.
+A robust and reliable Bluetooth Low Energy (BLE) server implementation for Node.js, designed to handle device discovery, connection management, and data communication with BLE devices.
 
 ## Features
 
-- BLE connectivity support
-- Message routing and handling
-- Device management
-- Secure communication
-- Error handling and logging
+- **Device Discovery**: Scan and discover BLE devices with configurable filters
+- **Connection Management**: Handle device connections with automatic reconnection support
+- **Error Handling**: Comprehensive error handling with custom error types
+- **Resource Management**: Proper cleanup of resources and event listeners
+- **Configuration**: YAML-based configuration system for easy customization
+- **Testing**: Comprehensive test suite with unit and integration tests
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
-- npm or yarn
-- Bluetooth-capable device
-- Operating system with BLE support
+- Node.js >= 14.x
+- npm >= 6.x
+- Bluetooth adapter with BLE support
+- Linux/macOS (Windows support coming soon)
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone [repository-url]
+git clone https://github.com/yourusername/mcp-ble-server.git
 cd mcp-ble-server
 ```
 
@@ -34,40 +31,134 @@ cd mcp-ble-server
 npm install
 ```
 
+3. Build the project:
+```bash
+npm run build
+```
+
+## Configuration
+
+Create a `config/default.yaml` file with your BLE settings:
+
+```yaml
+ble:
+  device_filters: []           # Array of device filters
+  scan_duration: 10            # Scan duration in seconds
+  connection_timeout: 5        # Connection timeout in seconds
+  auto_reconnect: true         # Enable automatic reconnection
+  reconnection_attempts: 3     # Maximum reconnection attempts
+```
+
+See [Configuration Guide](docs/CONFIGURATION.md) for detailed configuration options.
+
 ## Usage
 
-1. Start the server:
+### Basic Usage
+
+```javascript
+const { BLEService } = require('./src/ble/bleService');
+
+async function main() {
+  const bleService = new BLEService();
+
+  try {
+    // Start scanning for devices
+    await bleService.startScanning();
+
+    // Handle discovered devices
+    bleService.on('deviceDiscovered', (device) => {
+      console.log('Discovered device:', device);
+    });
+
+    // Connect to a device
+    const device = await bleService.connectToDevice({
+      name: 'MyDevice',
+      alias: 'my-device'
+    });
+
+    // Handle device events
+    device.on('data', (data) => {
+      console.log('Received data:', data);
+    });
+
+  } catch (error) {
+    console.error('BLE error:', error);
+  } finally {
+    // Clean up resources
+    bleService.cleanup();
+  }
+}
+
+main();
+```
+
+### Error Handling
+
+```javascript
+const { BLEError, BLEDeviceError, BLEScanError, BLEConnectionError } = require('./src/utils/bleErrors');
+
+try {
+  await bleService.startScanning();
+} catch (error) {
+  if (error instanceof BLEScanError) {
+    console.error('Scanning failed:', error.message);
+  } else if (error instanceof BLEConnectionError) {
+    console.error('Connection failed:', error.message);
+  } else {
+    console.error('Unexpected error:', error);
+  }
+}
+```
+
+## API Documentation
+
+See [API Documentation](docs/API.md) for detailed information about the available methods and events.
+
+## Testing
+
+Run the test suite:
+
 ```bash
-npm start
+npm test
 ```
 
-2. Connect to the BLE device using a compatible client.
+Run tests with coverage:
 
-## Project Structure
-
-```
-mcp-ble-server/
-├── src/
-│   ├── ble/           # BLE-related functionality
-│   ├── mcp/           # MCP protocol implementation
-│   ├── services/      # Core services
-│   └── utils/         # Utility functions
-├── tests/             # Test files
-├── config/            # Configuration files
-├── docs/              # Documentation
-└── logs/              # Application logs
+```bash
+npm test -- --coverage
 ```
 
-## Development
+See [Testing Guide](docs/TESTING.md) for detailed information about testing.
 
-- Follow the development guidelines in `CONTRIBUTING.md`
-- Run tests: `npm test`
-- Lint code: `npm run lint`
+## Error Handling
 
-## License
+The library provides custom error types for different BLE-related errors:
 
-[License Type] - See LICENSE file for details
+- `BLEError`: Base error class for all BLE-related errors
+- `BLEDeviceError`: Errors related to device operations
+- `BLEScanError`: Errors during device scanning
+- `BLEConnectionError`: Errors during device connection
+
+See [Error Handling Guide](docs/ERROR_HANDLING.md) for detailed information about error handling.
 
 ## Contributing
 
-Please read CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests. 
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [@abandonware/noble](https://github.com/abandonware/noble) - BLE library for Node.js
+- [winston](https://github.com/winstonjs/winston) - Logging library
+- [jest](https://github.com/facebook/jest) - Testing framework
+
+## Support
+
+For support, please open an issue in the GitHub repository or contact the maintainers. 
