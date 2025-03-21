@@ -1,5 +1,6 @@
 const noble = require('@abandonware/noble');
 const winston = require('winston');
+const { BLEDeviceError, BLEScanError, BLEConnectionError, errorHandler } = require('../utils/bleErrors');
 
 class BLEService {
   constructor(config) {
@@ -22,6 +23,11 @@ class BLEService {
     this.discoveredDevices = {};
     this.connectedDevices = {};
     this.reconnectionAttempts = {};
+    this.errorRetries = {};
+    this.retryTimeouts = new Map();
+
+    // Increase max listeners to prevent warnings
+    noble.setMaxListeners(20);
 
     // Bind methods
     this.handleStateChange = this.handleStateChange.bind(this);
@@ -33,14 +39,66 @@ class BLEService {
     noble.on('discover', this.handleDeviceDiscover);
   }
 
+  cleanup() {
+    // Remove event listeners
+    noble.removeListener('stateChange', this.handleStateChange);
+    noble.removeListener('discover', this.handleDeviceDiscover);
+
+    // Clear all timeouts
+    for (const [operation, timeoutId] of this.retryTimeouts.entries()) {
+      clearTimeout(timeoutId);
+      this.retryTimeouts.delete(operation);
+    }
+
+    // Disconnect all devices
+    Object.keys(this.connectedDevices).forEach(deviceId => {
+      try {
+        this.disconnectDevice(deviceId);
+      } catch (error) {
+        this.logger.error(`Failed to disconnect device ${deviceId} during cleanup:`, error);
+      }
+    });
+
+    // Reset state
+    this.isScanning = false;
+    this.discoveredDevices = {};
+    this.connectedDevices = {};
+    this.reconnectionAttempts = {};
+    this.errorRetries = {};
+  }
+
+  clearRetryTimeout(operation) {
+    const timeoutId = this.retryTimeouts.get(operation);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      this.retryTimeouts.delete(operation);
+    }
+  }
+
+  setRetryTimeout(operation, callback, delay) {
+    this.clearRetryTimeout(operation);
+    const timeoutId = setTimeout(() => {
+      this.retryTimeouts.delete(operation);
+      callback();
+    }, delay);
+    this.retryTimeouts.set(operation, timeoutId);
+  }
+
   async initialize() {
     try {
       if (noble.state === 'poweredOn') {
         await this.startScanning();
       }
     } catch (error) {
-      this.logger.error('Failed to initialize BLE service:', error);
-      throw error;
+      const { error: handledError, isRecoverable, shouldRetry, retryDelay } = 
+        errorHandler.handleError(error, { operation: 'initialize' });
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying initialization in ${retryDelay}ms`);
+        this.setRetryTimeout('initialize', () => this.initialize(), retryDelay);
+      }
+      
+      throw handledError;
     }
   }
 
@@ -54,19 +112,23 @@ class BLEService {
   }
 
   handleDeviceDiscover(device) {
-    this.logger.info(`Discovered device: ${device.id}`);
-    this.discoveredDevices[device.id] = device;
+    try {
+      this.logger.info(`Discovered device: ${device.id}`);
+      this.discoveredDevices[device.id] = device;
 
-    // Check if device matches any filters
-    const filter = this.config.device_filters.find(f => 
-      (f.name && device.advertisement.localName === f.name) ||
-      (f.address && device.address === f.address) ||
-      (f.services && f.services.some(s => device.advertisement.serviceUuids.includes(s)))
-    );
+      // Check if device matches any filters
+      const filter = this.config.device_filters.find(f => 
+        (f.name && device.advertisement.localName === f.name) ||
+        (f.address && device.address === f.address) ||
+        (f.services && f.services.some(s => device.advertisement.serviceUuids.includes(s)))
+      );
 
-    if (filter) {
-      device.alias = filter.alias || device.id;
-      this.logger.info(`Device ${device.id} matched filter: ${device.alias}`);
+      if (filter) {
+        device.alias = filter.alias || device.id;
+        this.logger.info(`Device ${device.id} matched filter: ${device.alias}`);
+      }
+    } catch (error) {
+      errorHandler.handleError(new BLEDeviceError('Failed to process discovered device', device.id, { error }));
     }
   }
 
@@ -97,8 +159,15 @@ class BLEService {
       await this.connectToDevice(deviceId);
       delete this.reconnectionAttempts[deviceId];
     } catch (error) {
-      this.logger.error(`Reconnection attempt failed for device ${deviceId}:`, error);
-      setTimeout(() => this.attemptReconnection(deviceId), 2000);
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(error, { deviceId, attempt: attempts + 1 });
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying reconnection in ${retryDelay}ms`);
+        this.setRetryTimeout(`reconnect-${deviceId}`, () => this.attemptReconnection(deviceId), retryDelay);
+      }
+      
+      throw handledError;
     }
   }
 
@@ -112,11 +181,30 @@ class BLEService {
 
       // Set scan timeout if configured
       if (this.config.scan_duration > 0) {
-        setTimeout(() => this.stopScanning(), this.config.scan_duration * 1000);
+        this.setRetryTimeout('scan-timeout', () => this.stopScanning(), this.config.scan_duration * 1000);
       }
     } catch (error) {
-      this.logger.error('Failed to start scanning:', error);
-      throw error;
+      const scanError = new BLEScanError('Failed to start scanning', { error });
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(scanError);
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying scan start in ${retryDelay}ms`);
+        this.setRetryTimeout('scan-retry', async () => {
+          try {
+            await noble.startScanningAsync();
+            this.isScanning = true;
+            this.logger.info('Started scanning for BLE devices after retry');
+          } catch (retryError) {
+            const { error: finalError } = errorHandler.handleError(
+              new BLEScanError('Failed to start scanning after retry', { error: retryError })
+            );
+            throw finalError;
+          }
+        }, retryDelay);
+      }
+      
+      throw handledError;
     }
   }
 
@@ -128,15 +216,23 @@ class BLEService {
       this.isScanning = false;
       this.logger.info('Stopped scanning for BLE devices');
     } catch (error) {
-      this.logger.error('Failed to stop scanning:', error);
-      throw error;
+      const scanError = new BLEScanError('Failed to stop scanning', { error });
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(scanError);
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying scan stop in ${retryDelay}ms`);
+        this.setRetryTimeout('scan-stop-retry', () => this.stopScanning(), retryDelay);
+      }
+      
+      throw handledError;
     }
   }
 
   async connectToDevice(deviceId) {
     const device = this.discoveredDevices[deviceId];
     if (!device) {
-      throw new Error(`Device not found: ${deviceId}`);
+      throw new BLEDeviceError('Device not found', deviceId);
     }
 
     if (this.connectedDevices[deviceId]) {
@@ -147,7 +243,11 @@ class BLEService {
     try {
       // Set connection timeout
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Connection timeout')), this.config.connection_timeout * 1000);
+        const timeoutId = setTimeout(() => {
+          this.clearRetryTimeout(`connect-timeout-${deviceId}`);
+          reject(new BLEConnectionError('Connection timeout', deviceId));
+        }, this.config.connection_timeout * 1000);
+        this.retryTimeouts.set(`connect-timeout-${deviceId}`, timeoutId);
       });
 
       // Connect to device
@@ -156,6 +256,9 @@ class BLEService {
         timeoutPromise
       ]);
 
+      // Clear timeout since connection succeeded
+      this.clearRetryTimeout(`connect-timeout-${deviceId}`);
+
       // Discover services
       const services = await device.discoverServices();
       this.logger.info(`Connected to device ${deviceId} and discovered ${services.length} services`);
@@ -163,8 +266,16 @@ class BLEService {
       this.connectedDevices[deviceId] = device;
       device.on('disconnect', () => this.handleDeviceDisconnect(deviceId));
     } catch (error) {
-      this.logger.error(`Failed to connect to device ${deviceId}:`, error);
-      throw error;
+      const connectionError = new BLEConnectionError('Failed to connect to device', deviceId, { error });
+      const { error: handledError, shouldRetry, retryDelay } = 
+        errorHandler.handleError(connectionError);
+      
+      if (shouldRetry) {
+        this.logger.info(`Retrying connection in ${retryDelay}ms`);
+        this.setRetryTimeout(`connect-retry-${deviceId}`, () => this.connectToDevice(deviceId), retryDelay);
+      }
+      
+      throw handledError;
     }
   }
 
@@ -180,8 +291,9 @@ class BLEService {
       delete this.connectedDevices[deviceId];
       this.logger.info(`Disconnected from device: ${deviceId}`);
     } catch (error) {
-      this.logger.error(`Failed to disconnect from device ${deviceId}:`, error);
-      throw error;
+      const { error: handledError } = 
+        errorHandler.handleError(new BLEDeviceError('Failed to disconnect from device', deviceId, { error }));
+      throw handledError;
     }
   }
 
