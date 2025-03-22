@@ -1,6 +1,14 @@
 const MessageBatcher = require('../../../../src/mcp/server/MessageBatcher');
 const { MESSAGE_TYPES } = require('../../../../src/mcp/protocol/messages');
 
+// Mock logger
+jest.mock('../../../../src/utils/logger', () => ({
+    info: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn()
+}));
+
 describe('MessageBatcher', () => {
     let batcher;
     const TEST_CONFIG = {
@@ -9,11 +17,15 @@ describe('MessageBatcher', () => {
     };
 
     beforeEach(() => {
+        jest.clearAllMocks();
         batcher = new MessageBatcher(TEST_CONFIG);
     });
 
     afterEach(() => {
         // Clean up any remaining timers
+        if (batcher) {
+            batcher.stop();
+        }
         jest.useRealTimers();
     });
 
@@ -154,10 +166,9 @@ describe('MessageBatcher', () => {
         it('should track errors', () => {
             const clientId = 'test-client';
             
-            // Simulate error by trying to access a property of undefined
-            const invalidMessage = { data: undefined };
+            // Simulate error by passing null message
             try {
-                batcher.addMessage(clientId, invalidMessage);
+                batcher.addMessage(clientId, null);
             } catch (error) {
                 // Expected error
             }
@@ -187,6 +198,161 @@ describe('MessageBatcher', () => {
             expect(afterReset.activeClients).toBe(0);
             expect(afterReset.maxBatchSize).toBe(0);
             expect(afterReset.minBatchSize).toBe(Infinity);
+        });
+    });
+
+    describe('dynamic batch sizing', () => {
+        let batcher;
+        const TEST_CONFIG = {
+            batchSize: 10,
+            minBatchSize: 5,
+            maxBatchSize: 20,
+            adaptiveInterval: 1000, // 1 second for testing
+            performanceThreshold: 0.8
+        };
+
+        beforeEach(() => {
+            jest.useFakeTimers();
+            batcher = new MessageBatcher(TEST_CONFIG);
+        });
+
+        afterEach(() => {
+            if (batcher) {
+                batcher.stop();
+            }
+            jest.useRealTimers();
+        });
+
+        it('should initialize with correct dynamic sizing config', () => {
+            expect(batcher.minBatchSize).toBe(TEST_CONFIG.minBatchSize);
+            expect(batcher.maxBatchSize).toBe(TEST_CONFIG.maxBatchSize);
+            expect(batcher.adaptiveInterval).toBe(TEST_CONFIG.adaptiveInterval);
+            expect(batcher.performanceThreshold).toBe(TEST_CONFIG.performanceThreshold);
+        });
+
+        it('should adjust batch size based on load', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+            const initialBatchSize = batcher.batchSize;
+
+            // Mock _calculateCurrentLoad to simulate high load
+            const originalCalculateLoad = batcher._calculateCurrentLoad;
+            batcher._calculateCurrentLoad = jest.fn().mockReturnValue(0.9); // 90% load
+
+            // Add some messages
+            for (let i = 0; i < 10; i++) {
+                batcher.addMessage(clientId, message);
+            }
+
+            // Trigger adjustment
+            jest.advanceTimersByTime(TEST_CONFIG.adaptiveInterval);
+
+            // Check if batch size was adjusted
+            const metrics = batcher.getMetrics();
+            expect(metrics.performance.adjustmentHistory.length).toBeGreaterThan(0);
+            expect(metrics.performance.currentLoad).toBeGreaterThan(0);
+            expect(batcher.batchSize).toBeGreaterThan(initialBatchSize);
+
+            // Restore original method
+            batcher._calculateCurrentLoad = originalCalculateLoad;
+        });
+
+        it('should respect min and max batch size limits', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+
+            // Simulate very high load
+            for (let i = 0; i < 50; i++) {
+                batcher.addMessage(clientId, message);
+                if (i % 3 === 0) {
+                    jest.advanceTimersByTime(TEST_CONFIG.adaptiveInterval);
+                }
+            }
+
+            // Trigger final adjustment
+            jest.advanceTimersByTime(TEST_CONFIG.adaptiveInterval);
+
+            // Check if batch size stayed within limits
+            expect(batcher.batchSize).toBeLessThanOrEqual(TEST_CONFIG.maxBatchSize);
+            expect(batcher.batchSize).toBeGreaterThanOrEqual(TEST_CONFIG.minBatchSize);
+        });
+
+        it('should maintain adjustment history', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+
+            // Generate varying load over time
+            for (let i = 0; i < 12; i++) {
+                const messageCount = Math.floor(Math.random() * 10) + 1;
+                for (let j = 0; j < messageCount; j++) {
+                    batcher.addMessage(clientId, message);
+                }
+                jest.advanceTimersByTime(TEST_CONFIG.adaptiveInterval);
+            }
+
+            const metrics = batcher.getMetrics();
+            expect(metrics.performance.adjustmentHistory.length).toBeLessThanOrEqual(10);
+            expect(metrics.performance.adjustmentHistory.length).toBeGreaterThan(0);
+        });
+
+        it('should handle errors during batch size adjustment', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+            const initialBatchSize = batcher.batchSize;
+
+            // Mock _calculateCurrentLoad to throw an error
+            const originalCalculateLoad = batcher._calculateCurrentLoad;
+            batcher._calculateCurrentLoad = jest.fn().mockImplementation(() => {
+                throw new Error('Test error');
+            });
+
+            // Generate some load
+            for (let i = 0; i < 5; i++) {
+                batcher.addMessage(clientId, message);
+            }
+
+            // Trigger adjustment
+            jest.advanceTimersByTime(TEST_CONFIG.adaptiveInterval);
+
+            // Verify error was handled and batch size remained unchanged
+            expect(batcher.batchSize).toBe(initialBatchSize);
+
+            // Restore original method
+            batcher._calculateCurrentLoad = originalCalculateLoad;
+        });
+    });
+
+    describe('cleanup', () => {
+        it('should clean up resources when stopped', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+
+            // Add some messages to create batches
+            batcher.addMessage(clientId, message);
+            batcher.addMessage(clientId, message);
+
+            // Stop the batcher
+            batcher.stop();
+
+            // Verify cleanup
+            expect(batcher.adaptiveTimer).toBeNull();
+            expect(batcher.batches.size).toBe(0);
+            expect(batcher.timers.size).toBe(0);
+            expect(batcher.batchStartTimes.size).toBe(0);
+        });
+
+        it('should flush remaining batches when stopped', () => {
+            const clientId = 'test-client';
+            const message = { type: MESSAGE_TYPES.DEVICE_FOUND, data: { id: '1' } };
+            const batchHandler = jest.fn();
+
+            batcher.on('batch', batchHandler);
+            batcher.addMessage(clientId, message);
+            batcher.stop();
+
+            expect(batchHandler).toHaveBeenCalledTimes(1);
+            expect(batchHandler.mock.calls[0][0]).toBe(clientId);
+            expect(batchHandler.mock.calls[0][1]).toHaveLength(1);
         });
     });
 }); 
