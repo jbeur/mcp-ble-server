@@ -16,7 +16,8 @@ const MESSAGE_TYPES = {
   CHARACTERISTIC_READ: 'CHARACTERISTIC_READ',
   CHARACTERISTIC_WRITE: 'CHARACTERISTIC_WRITE',
   ERROR: 'ERROR',
-  CONNECTION_ACK: 'CONNECTION_ACK'
+  CONNECTION_ACK: 'CONNECTION_ACK',
+  BATCH: 'BATCH'
 };
 
 /**
@@ -28,6 +29,20 @@ const ERROR_CODES = {
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
   SESSION_EXPIRED: 'SESSION_EXPIRED',
   INVALID_TOKEN: 'INVALID_TOKEN',
+  NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
+  AUTH_ERROR: 'AUTH_ERROR',
+
+  // Message errors
+  INVALID_MESSAGE: 'INVALID_MESSAGE',
+  INVALID_MESSAGE_TYPE: 'INVALID_MESSAGE_TYPE',
+  MESSAGE_TOO_LARGE: 'MESSAGE_TOO_LARGE',
+  QUEUE_FULL: 'QUEUE_FULL',
+  PROCESSING_ERROR: 'PROCESSING_ERROR',
+
+  // Connection errors
+  CONNECTION_LIMIT_REACHED: 'CONNECTION_LIMIT_REACHED',
+  CONNECTION_CLOSED: 'CONNECTION_CLOSED',
+  CONNECTION_ERROR: 'CONNECTION_ERROR',
 
   // BLE errors
   SCAN_ALREADY_ACTIVE: 'SCAN_ALREADY_ACTIVE',
@@ -37,9 +52,7 @@ const ERROR_CODES = {
   NOT_CONNECTED: 'NOT_CONNECTED',
   INVALID_PARAMS: 'INVALID_PARAMS',
   OPERATION_FAILED: 'OPERATION_FAILED',
-  INVALID_MESSAGE: 'INVALID_MESSAGE',
-  BLE_NOT_AVAILABLE: 'BLE_NOT_AVAILABLE',
-  CONNECTION_ERROR: 'CONNECTION_ERROR'
+  BLE_NOT_AVAILABLE: 'BLE_NOT_AVAILABLE'
 };
 
 /**
@@ -108,7 +121,29 @@ const MessageBuilder = {
     buildConnectionAck(clientId) {
         return {
             type: MESSAGE_TYPES.CONNECTION_ACK,
-            clientId,
+            data: { clientId },
+            timestamp: Date.now()
+        };
+    },
+
+    /**
+     * Build an authenticated message
+     */
+    buildAuthenticated(token) {
+        return {
+            type: MESSAGE_TYPES.AUTHENTICATED,
+            data: { token },
+            timestamp: Date.now()
+        };
+    },
+
+    /**
+     * Build a session validation response message
+     */
+    buildSessionValidation(isValid) {
+        return {
+            type: MESSAGE_TYPES.SESSION_VALID,
+            data: { valid: isValid },
             timestamp: Date.now()
         };
     },
@@ -159,7 +194,7 @@ const MessageBuilder = {
     /**
      * Build an error message
      */
-    buildError(code, message) {
+    buildError(code, message = '') {
         return {
             type: MESSAGE_TYPES.ERROR,
             code,
