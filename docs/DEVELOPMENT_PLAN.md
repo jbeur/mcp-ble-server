@@ -139,7 +139,7 @@ mcp-ble-server/
     - [x] ML-based timeout optimization
     - [x] Load prediction
     - [x] Adaptive compression levels
-  - [ ] Connection pooling
+  - [x] Connection pooling
     - [x] Pool size configuration
     - [x] Connection reuse
     - [x] Pool health monitoring
@@ -161,7 +161,7 @@ mcp-ble-server/
       - [x] Automatic pool scaling
       - [x] Load balance score calculation
       - [x] Load balance metrics
-    - [ ] Advanced connection management
+    - [x] Advanced connection management
       - [x] Connection warmup strategies
         - [x] Warmup task implementation
         - [x] Health check integration
@@ -237,12 +237,36 @@ mcp-ble-server/
           - [x] Violation reporting
           - [x] Warning logging
           - [x] Resource cleanup
-    - [ ] Advanced metrics
-      - [ ] Connection lifecycle tracking
-      - [ ] Resource utilization metrics
-      - [ ] Performance anomaly detection
+    - [x] Advanced metrics
+      - [x] Connection lifecycle tracking
+        - [x] Initialization tracking
+        - [x] Establishment tracking
+        - [x] Termination tracking
+        - [x] State change tracking
+        - [x] Error tracking
+        - [x] Health status tracking
+      - [x] Resource utilization metrics
+        - [x] Memory usage tracking
+        - [x] CPU usage tracking
+        - [x] Network usage tracking
+        - [x] Resource threshold tracking
+      - [x] Performance anomaly detection
+        - [x] Statistical baseline calculation
+        - [x] Z-score based anomaly detection
+        - [x] Metric-specific thresholds
+        - [x] Anomaly logging and reporting
+        - [x] Baseline persistence
+        - [x] Adaptive thresholds
       - [ ] Predictive scaling metrics
+        - [ ] Load prediction models
+        - [ ] Resource usage forecasting
+        - [ ] Scaling recommendations
+        - [ ] Trend analysis
       - [ ] SLA compliance monitoring
+        - [ ] Response time tracking
+        - [ ] Availability monitoring
+        - [ ] Error rate tracking
+        - [ ] SLA violation alerts
     - [ ] Fault tolerance
       - [ ] Connection failover
       - [ ] High availability support
