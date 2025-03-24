@@ -3,7 +3,7 @@ const { logger } = require('../../utils/logger');
 const { metrics } = require('../../utils/metrics');
 const { MESSAGE_TYPES, ERROR_CODES, MessageBuilder } = require('../protocol/messages');
 const AuthService = require('../../auth/AuthService');
-const MessageBatcher = require('./MessageBatcher');
+const { MessageBatcher, PRIORITY_LEVELS } = require('./MessageBatcher');
 
 class WebSocketServer {
     constructor(config) {
@@ -25,7 +25,32 @@ class WebSocketServer {
             batching: {
                 enabled: true,
                 batchSize: 10,
-                batchTimeout: 100
+                batchTimeout: 100,
+                compression: {
+                    enabled: true,
+                    minSize: 1024,
+                    level: 6,
+                    priorityThresholds: {
+                        high: 512,
+                        medium: 1024,
+                        low: 2048
+                    }
+                },
+                timeouts: {
+                    high: 50,
+                    medium: 100,
+                    low: 200
+                },
+                analytics: {
+                    enabled: true,
+                    interval: 5000,
+                    metrics: {
+                        batchSizes: true,
+                        latencies: true,
+                        compression: true,
+                        priorities: true
+                    }
+                }
             }
         };
 
@@ -40,11 +65,15 @@ class WebSocketServer {
         this.messageBatcher = this.config.batching.enabled ? 
             new MessageBatcher({
                 batchSize: this.config.batching.batchSize,
-                batchTimeout: this.config.batching.batchTimeout
+                batchTimeout: this.config.batching.batchTimeout,
+                compression: this.config.batching.compression,
+                timeouts: this.config.batching.timeouts,
+                analytics: this.config.batching.analytics
             }) : null;
 
         if (this.messageBatcher) {
             this.messageBatcher.on('batch', this.handleBatch.bind(this));
+            this.messageBatcher.on('analytics', this.handleAnalytics.bind(this));
         }
     }
 
@@ -430,7 +459,7 @@ class WebSocketServer {
     /**
      * Handle a batch of messages for a client
      * @param {string} clientId - The client identifier
-     * @param {Array} messages - Array of messages to send
+     * @param {Array|Object} messages - Array of messages or compressed batch to send
      */
     handleBatch(clientId, messages) {
         try {
@@ -442,13 +471,70 @@ class WebSocketServer {
 
             const batchMessage = {
                 type: MESSAGE_TYPES.BATCH,
-                data: { messages }
+                data: { 
+                    messages: messages.compressed ? messages.data : messages,
+                    compressed: messages.compressed || false,
+                    algorithm: messages.algorithm,
+                    originalSize: messages.originalSize,
+                    compressedSize: messages.compressedSize
+                }
             };
 
             client.ws.send(JSON.stringify(batchMessage));
-            metrics.mcpMessagesSent.inc(messages.length);
+            metrics.mcpMessagesSent.inc(messages.compressed ? 1 : messages.length);
+            
+            // Update compression metrics if applicable
+            if (messages.compressed) {
+                metrics.mcpCompressedBatches.inc();
+                metrics.mcpBytesSaved.inc(messages.originalSize - messages.compressedSize);
+            }
         } catch (error) {
             logger.error('Error sending batch message:', { error, clientId });
+        }
+    }
+
+    /**
+     * Handle analytics updates from the message batcher
+     * @param {Object} analytics - Analytics data
+     */
+    handleAnalytics(analytics) {
+        try {
+            // Update Prometheus metrics
+            if (analytics.batchSizeHistory.length > 0) {
+                const latest = analytics.batchSizeHistory[analytics.batchSizeHistory.length - 1];
+                metrics.mcpAverageBatchSize.set(latest.average);
+                metrics.mcpMaxBatchSize.set(latest.max);
+                metrics.mcpMinBatchSize.set(latest.min);
+            }
+
+            if (analytics.latencyHistory.length > 0) {
+                const latest = analytics.latencyHistory[analytics.latencyHistory.length - 1];
+                metrics.mcpAverageLatency.set(latest.average);
+                metrics.mcpMaxLatency.set(latest.max);
+                metrics.mcpMinLatency.set(latest.min);
+            }
+
+            if (analytics.compressionHistory.length > 0) {
+                const latest = analytics.compressionHistory[analytics.compressionHistory.length - 1];
+                metrics.mcpCompressionRatio.set(latest.ratio);
+                metrics.mcpBytesSavedTotal.set(latest.bytesSaved);
+            }
+
+            // Update priority distribution metrics
+            metrics.mcpPriorityDistribution.set(analytics.priorityDistribution);
+
+            // Log analytics summary
+            logger.info('Message batching analytics update:', {
+                batchSizes: analytics.batchSizeHistory.length > 0 ? 
+                    analytics.batchSizeHistory[analytics.batchSizeHistory.length - 1] : null,
+                latencies: analytics.latencyHistory.length > 0 ? 
+                    analytics.latencyHistory[analytics.latencyHistory.length - 1] : null,
+                compression: analytics.compressionHistory.length > 0 ? 
+                    analytics.compressionHistory[analytics.compressionHistory.length - 1] : null,
+                priorityDistribution: analytics.priorityDistribution
+            });
+        } catch (error) {
+            logger.error('Error handling analytics:', { error });
         }
     }
 }

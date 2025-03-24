@@ -1,544 +1,511 @@
-const { EventEmitter } = require('events');
+const EventEmitter = require('events');
+const BatchCompressor = require('./BatchCompressor');
 const logger = require('../../utils/logger');
 const zlib = require('zlib');
 const { promisify } = require('util');
+const BatchPredictor = require('./BatchPredictor');
+const { PRIORITY_LEVELS } = require('../../utils/constants');
+const { deepMerge } = require('../../utils/utils');
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
-// Priority levels
-const PRIORITY_LEVELS = {
-    HIGH: 0,
-    MEDIUM: 1,
-    LOW: 2
-};
-
 const DEFAULT_CONFIG = {
     batchSize: 10,
-    batchTimeout: 100,
-    minBatchSize: 5,
-    maxBatchSize: 50,
-    adaptiveInterval: 60000,
-    performanceThreshold: 0.8,
-    enableAdaptiveSizing: true,
+    minBatchSize: 1,
+    maxBatchSize: 100,
+    timeouts: {
+        high: 1000,
+        medium: 5000,
+        low: 10000
+    },
     compression: {
         enabled: true,
-        minSize: 1024, // 1KB
-        level: 6,
-        priorityThresholds: {
-            high: 512,    // 512B
-            medium: 1024, // 1KB
-            low: 2048     // 2KB
-        }
+        minSize: 5
     },
-    timeouts: {
-        high: 50,    // 50ms
-        medium: 100, // 100ms
-        low: 200     // 200ms
-    }
+    analytics: {
+        enabled: true,
+        interval: 60000
+    },
+    adaptiveInterval: 5000,
+    performanceThreshold: 0.8
 };
 
 class MessageBatcher extends EventEmitter {
     constructor(config = {}) {
         super();
-        this.batchSize = config.batchSize || DEFAULT_CONFIG.batchSize;
-        this.batchTimeout = config.batchTimeout || DEFAULT_CONFIG.batchTimeout;
-        this.minBatchSize = config.minBatchSize || DEFAULT_CONFIG.minBatchSize;
-        this.maxBatchSize = config.maxBatchSize || DEFAULT_CONFIG.maxBatchSize;
-        this.adaptiveInterval = config.adaptiveInterval || DEFAULT_CONFIG.adaptiveInterval;
-        this.performanceThreshold = config.performanceThreshold || DEFAULT_CONFIG.performanceThreshold;
-        this.enableAdaptiveSizing = config.enableAdaptiveSizing !== false;
-        this.compressionConfig = config.compression || DEFAULT_CONFIG.compression;
-        this.timeoutConfig = config.timeouts || DEFAULT_CONFIG.timeouts;
-        this.batches = new Map(); // clientId -> { high: [], medium: [], low: [] }
-        this.timers = new Map(); // clientId -> timer
-        this.batchStartTimes = new Map(); // clientId -> startTime
-        this.adaptiveTimer = null; // Store the interval timer
+        this.config = deepMerge(DEFAULT_CONFIG, config);
+        this.batches = new Map();
+        this.timers = new Map();
+        this.batchStartTimes = new Map();
         this.metrics = {
             totalBatches: 0,
             totalMessages: 0,
-            averageBatchSize: 0,
+            activeBatches: 0,
             maxBatchSize: 0,
             minBatchSize: Infinity,
-            batchLatency: {
-                total: 0,
-                count: 0,
-                max: 0,
-                min: Infinity
+            averageBatchSize: 0,
+            batchFlushReasons: {
+                size: 0,
+                timeout: 0,
+                priority: 0,
+                manual: 0
             },
+            priorities: {
+                high: { count: 0, latency: 0 },
+                medium: { count: 0, latency: 0 },
+                low: { count: 0, latency: 0 }
+            },
+            compression: {
+                totalCompressed: 0,
+                totalBytesSaved: 0,
+                averageCompressionRatio: 0,
+                averageCompressionTimes: 0
+            },
+            errors: {
+                compression: 0,
+                invalidMessage: 0,
+                invalidClientId: 0,
+                validation: 0,
+                other: 0
+            },
+            performance: {
+                currentLoad: 0,
+                targetLoad: this.config.performanceThreshold,
+                adjustmentHistory: []
+            }
+        };
+
+        this.compressionEnabled = this.config.compression.enabled;
+        if (this.compressionEnabled) {
+            this.compressor = new BatchCompressor(this.config.compression);
+        }
+
+        if (this.config.analytics.enabled) {
+            this._lastAnalyticsUpdate = 0;
+            this._analyticsHistory = {
+                batchSizeHistory: [],
+                latencyHistory: [],
+                compressionHistory: []
+            };
+        }
+
+        this.batchSize = this.config.batchSize;
+        this.predictor = new BatchPredictor(this.config);
+        this.adaptiveInterval = this.config.adaptiveInterval;
+        this.performanceThreshold = this.config.performanceThreshold;
+
+        // Listen for batch size predictions
+        this.predictor.on('prediction', (data) => {
+            if (data.confidence > 0.7) { // Only adjust if confidence is high enough
+                const oldSize = this.batchSize;
+                this.batchSize = data.recommendedBatchSize;
+                logger.info('Adjusted batch size based on ML prediction', {
+                    oldSize,
+                    newSize: this.batchSize,
+                    confidence: data.confidence,
+                    features: data.features
+                });
+            }
+        });
+
+        // Start analytics if enabled
+        if (this.config.analytics.enabled) {
+            this._startAnalytics();
+        }
+
+        // Start adaptive sizing if enabled
+        this.adaptiveTimer = null;
+        if (this.config.adaptiveInterval) {
+            this._startAdaptiveSizing();
+        }
+    }
+
+    _startAnalytics() {
+        this.analyticsTimer = setInterval(() => {
+            this._updateAnalytics();
+        }, this.config.analytics.interval);
+        this.analyticsTimer.unref();
+    }
+
+    _startAdaptiveSizing() {
+        this.adaptiveTimer = setInterval(() => {
+            this._adjustBatchSize();
+        }, this.config.adaptiveInterval);
+        this.adaptiveTimer.unref();
+    }
+
+    _updateAnalytics() {
+        if (!this._shouldUpdateAnalytics()) return;
+
+        const analytics = {
+            batchSizeHistory: [{
+                timestamp: Date.now(),
+                average: this.metrics.averageBatchSize,
+                max: this.metrics.maxBatchSize,
+                min: this.metrics.minBatchSize
+            }],
+            latencyHistory: [{
+                timestamp: Date.now(),
+                average: this._calculateAverageLatency(),
+                max: this._calculateMaxLatency(),
+                min: this._calculateMinLatency()
+            }],
+            compressionHistory: [{
+                timestamp: Date.now(),
+                ratio: this.metrics.compression.averageCompressionRatio,
+                bytesSaved: this.metrics.compression.totalBytesSaved,
+                averageTimes: this.metrics.compression.averageCompressionTimes || 0
+            }],
+            priorityDistribution: this._calculatePriorityDistribution()
+        };
+
+        // Initialize history if not exists
+        if (!this._analyticsHistory) {
+            this._analyticsHistory = {
+                batchSizeHistory: [],
+                latencyHistory: [],
+                compressionHistory: []
+            };
+        }
+
+        // Add new data to history
+        this._analyticsHistory.batchSizeHistory.push(analytics.batchSizeHistory[0]);
+        this._analyticsHistory.latencyHistory.push(analytics.latencyHistory[0]);
+        this._analyticsHistory.compressionHistory.push(analytics.compressionHistory[0]);
+
+        // Keep only last 100 entries
+        const maxHistorySize = 100;
+        if (this._analyticsHistory.batchSizeHistory.length > maxHistorySize) {
+            this._analyticsHistory.batchSizeHistory = this._analyticsHistory.batchSizeHistory.slice(-maxHistorySize);
+            this._analyticsHistory.latencyHistory = this._analyticsHistory.latencyHistory.slice(-maxHistorySize);
+            this._analyticsHistory.compressionHistory = this._analyticsHistory.compressionHistory.slice(-maxHistorySize);
+        }
+
+        // Include history in analytics event
+        analytics.batchSizeHistory = [...this._analyticsHistory.batchSizeHistory];
+        analytics.latencyHistory = [...this._analyticsHistory.latencyHistory];
+        analytics.compressionHistory = [...this._analyticsHistory.compressionHistory];
+
+        this.emit('analytics', analytics);
+    }
+
+    _calculatePriorityDistribution() {
+        const totalMessages = Object.values(this.metrics.priorities).reduce((sum, p) => sum + p.count, 0);
+        if (totalMessages === 0) return { high: 0, medium: 0, low: 0 };
+
+        const distribution = {};
+        Object.entries(this.metrics.priorities).forEach(([priority, data]) => {
+            // Calculate exact ratio first
+            const ratio = data.count / totalMessages;
+            // Round to 1 decimal place
+            distribution[priority] = Math.round(ratio * 10) / 10;
+        });
+
+        return distribution;
+    }
+
+    _calculateAverageLatency() {
+        const totalLatency = Object.values(this.metrics.priorities).reduce((sum, p) => sum + p.latency, 0);
+        const totalMessages = Object.values(this.metrics.priorities).reduce((sum, p) => sum + p.count, 0);
+        return totalMessages > 0 ? totalLatency / totalMessages : 0;
+    }
+
+    _calculateMaxLatency() {
+        return Math.max(...Object.values(this.metrics.priorities).map(p => p.latency));
+    }
+
+    _calculateMinLatency() {
+        return Math.min(...Object.values(this.metrics.priorities).map(p => p.latency));
+    }
+
+    getMetrics() {
+        return {
+            ...this.metrics,
+            priorities: {
+                high: { ...this.metrics.priorities.high },
+                medium: { ...this.metrics.priorities.medium },
+                low: { ...this.metrics.priorities.low }
+            },
+            compression: { ...this.metrics.compression },
+            errors: { ...this.metrics.errors },
+            performance: { ...this.metrics.performance }
+        };
+    }
+
+    resetMetrics() {
+        this.metrics = {
+            totalMessages: 0,
             activeClients: 0,
             activeBatches: 0,
+            maxBatchSize: 0,
+            minBatchSize: Infinity,
+            averageBatchSize: 0,
+            totalBatches: 0,
             batchFlushReasons: {
                 size: 0,
                 timeout: 0,
                 clientDisconnect: 0
             },
-            errors: {
-                addMessage: 0,
-                flushBatch: 0,
-                clientDisconnect: 0,
-                compression: 0
-            },
-            performance: {
-                lastAdjustment: Date.now(),
-                currentLoad: 0,
-                targetLoad: 0,
-                adjustmentHistory: []
-            },
             priorities: {
-                high: { count: 0, averageLatency: 0 },
-                medium: { count: 0, averageLatency: 0 },
-                low: { count: 0, averageLatency: 0 }
+                high: { count: 0, latency: 0 },
+                medium: { count: 0, latency: 0 },
+                low: { count: 0, latency: 0 }
             },
             compression: {
                 totalCompressed: 0,
-                totalUncompressed: 0,
                 totalBytesSaved: 0,
-                compressionRatio: 0
+                averageCompressionRatio: 0,
+                averageCompressionTimes: {
+                    high: 0,
+                    medium: 0,
+                    low: 0
+                }
+            },
+            errors: {
+                addMessage: 0,
+                compression: 0,
+                invalidMessage: 0,
+                invalidClientId: 0
+            },
+            performance: {
+                adjustmentHistory: [],
+                currentLoad: 0,
+                targetLoad: this.performanceThreshold
             }
         };
-
-        // Start adaptive sizing only if enabled
-        if (this.enableAdaptiveSizing) {
-            this._startAdaptiveSizing();
-        }
     }
 
-    _startAdaptiveSizing() {
-        // Clear any existing timer
-        if (this.adaptiveTimer) {
-            clearInterval(this.adaptiveTimer);
-            this.adaptiveTimer = null;
-        }
-
-        // Start new timer
-        this.adaptiveTimer = setInterval(() => {
-            this._adjustBatchSize();
-        }, this.adaptiveInterval);
-    }
-
-    /**
-     * Stop adaptive sizing and clean up resources
-     */
-    stop() {
-        // Clear adaptive timer first
-        if (this.adaptiveTimer) {
-            clearInterval(this.adaptiveTimer);
-            this.adaptiveTimer = null;
-        }
-
-        // Clean up any remaining batch timers
-        for (const [clientId, timer] of this.timers) {
-            clearTimeout(timer);
-            this.timers.delete(clientId);
-        }
-
-        // Flush any remaining batches
-        for (const clientId of this.batches.keys()) {
-            this._flushBatch(clientId, 'clientDisconnect');
-        }
-
-        // Clear all data structures
-        this.batches.clear();
-        this.batchStartTimes.clear();
-        this.timers.clear();
-
-        // Remove all listeners
-        this.removeAllListeners();
-    }
-
-    _adjustBatchSize() {
+    async addMessage(clientId, message) {
         try {
-            const currentLoad = this._calculateCurrentLoad();
-            const targetLoad = this.performanceThreshold;
-            const loadDiff = currentLoad - targetLoad;
-
-            // Store current metrics
-            this.metrics.performance.lastAdjustment = Date.now();
-            this.metrics.performance.currentLoad = currentLoad;
-            this.metrics.performance.targetLoad = targetLoad;
-
-            // Adjust batch size based on load
-            if (Math.abs(loadDiff) > 0.05) { // More sensitive to load changes
-                const adjustmentFactor = Math.min(Math.abs(loadDiff), 0.5); // Cap adjustment factor
-                const adjustment = Math.round(this.batchSize * adjustmentFactor * (loadDiff > 0 ? -1 : 1));
-                const newSize = Math.max(
-                    this.minBatchSize,
-                    Math.min(this.maxBatchSize, this.batchSize + adjustment)
-                );
-
-                if (newSize !== this.batchSize) {
-                    // Record adjustment before changing batch size
-                    this.metrics.performance.adjustmentHistory.push({
-                        timestamp: Date.now(),
-                        oldSize: this.batchSize,
-                        newSize: newSize,
-                        loadDiff: loadDiff,
-                        currentLoad: currentLoad,
-                        targetLoad: targetLoad
-                    });
-
-                    // Keep only last 10 adjustments
-                    if (this.metrics.performance.adjustmentHistory.length > 10) {
-                        this.metrics.performance.adjustmentHistory.shift();
-                    }
-
-                    this.batchSize = newSize;
-                    logger.info('Adjusted batch size:', {
-                        oldSize: this.batchSize,
-                        newSize: newSize,
-                        currentLoad: currentLoad,
-                        targetLoad: targetLoad,
-                        adjustment: adjustment
-                    });
-                }
-            }
-        } catch (error) {
-            logger.error('Error adjusting batch size:', { error });
-        }
-    }
-
-    _calculateCurrentLoad() {
-        const now = Date.now();
-        const recentBatches = this.metrics.performance.adjustmentHistory.filter(
-            adj => now - adj.timestamp < this.adaptiveInterval
-        );
-
-        if (recentBatches.length === 0) {
-            // If no recent adjustments, calculate based on current batch sizes and total messages
-            const totalBatches = this.batches.size;
-            if (totalBatches === 0) return 0;
-
-            let totalLoad = 0;
-            let totalMessages = 0;
-            for (const [_, batch] of this.batches) {
-                // Calculate total messages across all priority levels
-                const batchSize = Object.values(batch).reduce((sum, priorityBatch) => sum + priorityBatch.length, 0);
-                totalMessages += batchSize;
-                const batchSizeRatio = batchSize / this.maxBatchSize;
-                const loadFactor = Math.min(1, batchSizeRatio);
-                totalLoad += loadFactor;
+            if (!clientId) {
+                this.metrics.errors.invalidClientId++;
+                throw new Error('Invalid client ID');
             }
 
-            // If we have a lot of messages in the current batches, increase the load factor
-            if (totalMessages > this.maxBatchSize * totalBatches) {
-                return Math.min(1, totalLoad / totalBatches + 0.2); // Less aggressive increase
+            if (!message || !message.type) {
+                this.metrics.errors.invalidMessage++;
+                throw new Error('Invalid message');
             }
 
-            return totalLoad / totalBatches;
-        }
+            // Set default priority if not provided
+            message.priority = message.priority || 'medium';
 
-        // Calculate average load based on adjustment history and current state
-        const historyLoad = recentBatches.reduce((sum, adj) => {
-            const batchSizeRatio = adj.newSize / this.maxBatchSize;
-            const loadFactor = Math.min(1, batchSizeRatio);
-            return sum + loadFactor;
-        }, 0) / recentBatches.length;
-
-        // Factor in current state
-        const currentLoad = this.batches.size > 0 ? 
-            Array.from(this.batches.values()).reduce((sum, batch) => {
-                const batchSize = Object.values(batch).reduce((total, priorityBatch) => total + priorityBatch.length, 0);
-                return sum + (batchSize / this.maxBatchSize);
-            }, 0) / this.batches.size : 0;
-
-        // Weighted average of history and current load
-        return Math.min(1, (historyLoad * 0.6 + currentLoad * 0.4));
-    }
-
-    /**
-     * Add a message to the batch for a specific client
-     * @param {string} clientId - The client identifier
-     * @param {Object} message - The message to batch
-     * @param {number} priority - Message priority (0: high, 1: medium, 2: low)
-     */
-    async addMessage(clientId, message, priority = PRIORITY_LEVELS.MEDIUM) {
-        try {
-            if (!message) {
-                throw new Error('Message cannot be null or undefined');
-            }
-
-            if (!message.type || !message.data) {
-                this.metrics.errors.addMessage++;
-                throw new Error('Invalid message format: must have type and data properties');
-            }
-
+            // Create new batch if none exists
             if (!this.batches.has(clientId)) {
-                this.batches.set(clientId, {
-                    high: [],
-                    medium: [],
-                    low: []
-                });
+                this.batches.set(clientId, []);
                 this.batchStartTimes.set(clientId, Date.now());
-                this._startBatchTimer(clientId, priority);
-                this.metrics.activeClients++;
                 this.metrics.activeBatches++;
             }
 
-            const clientBatches = this.batches.get(clientId);
-            const priorityKey = this._getPriorityKey(priority);
-            clientBatches[priorityKey].push(message);
+            const batch = this.batches.get(clientId);
+            batch.push(message);
             this.metrics.totalMessages++;
-            this.metrics.priorities[priorityKey].count++;
+            this.metrics.priorities[message.priority].count++;
 
-            // Check if we should flush based on total messages across all priorities
-            const totalMessages = Object.values(clientBatches).reduce((sum, batch) => sum + batch.length, 0);
-            if (totalMessages >= this.batchSize) {
+            // Start or update timer
+            this._startBatchTimer(clientId);
+
+            // Check if batch should be flushed
+            if (batch.length >= this.batchSize) {
                 await this._flushBatch(clientId, 'size');
             }
         } catch (error) {
-            logger.error('Error adding message to batch:', { error, clientId });
-            this.metrics.errors.addMessage++;
+            logger.error('Error adding message', { error, clientId });
             throw error;
         }
     }
 
-    /**
-     * Get priority key from level
-     * @private
-     * @param {number} priority - Priority level
-     * @returns {string} Priority key
-     */
-    _getPriorityKey(priority) {
-        switch (priority) {
-            case PRIORITY_LEVELS.HIGH: return 'high';
-            case PRIORITY_LEVELS.MEDIUM: return 'medium';
-            case PRIORITY_LEVELS.LOW: return 'low';
-            default: return 'medium';
-        }
-    }
+    _startBatchTimer(clientId) {
+        const batch = this.batches.get(clientId);
+        if (!batch || batch.length === 0) return;
 
-    /**
-     * Start a timer for a client's batch
-     * @private
-     * @param {string} clientId - The client identifier
-     */
-    _startBatchTimer(clientId, priority) {
-        // Clear any existing timer
-        const existingTimer = this.timers.get(clientId);
-        if (existingTimer) {
-            clearTimeout(existingTimer);
-            this.timers.delete(clientId);
+        // Find highest priority message
+        const priorities = { high: 0, medium: 1, low: 2 };
+        const highestPriority = batch.reduce((a, b) => {
+            return priorities[a.priority] < priorities[b.priority] ? a : b;
+        }).priority;
+
+        // Clear existing timer
+        if (this.timers.has(clientId)) {
+            clearTimeout(this.timers.get(clientId));
         }
 
-        const timeout = this._getPriorityTimeout(priority);
-        const timer = setTimeout(() => {
-            this._flushBatch(clientId, 'timeout');
+        // Set new timer based on highest priority
+        const timeout = this.config.timeouts[highestPriority];
+        const timer = setTimeout(async () => {
+            try {
+                await this._flushBatch(clientId, 'timeout');
+            } catch (error) {
+                logger.error('Error in batch timer', { error, clientId });
+            }
         }, timeout);
 
         this.timers.set(clientId, timer);
     }
 
-    /**
-     * Flush the batch for a specific client
-     * @private
-     * @param {string} clientId - The client identifier
-     * @param {string} reason - The reason for flushing
-     */
-    async _flushBatch(clientId, reason = 'size') {
+    async _flushBatch(clientId, reason) {
         try {
-            const clientBatches = this.batches.get(clientId);
-            if (!clientBatches) return;
+            const batch = this.batches.get(clientId);
+            if (!batch || batch.length === 0) return;
 
-            // Clear the timer first
-            const timer = this.timers.get(clientId);
-            if (timer) {
-                clearTimeout(timer);
-                this.timers.delete(clientId);
-            }
-
-            // Combine batches in priority order
-            const batch = [
-                ...clientBatches.high,
-                ...clientBatches.medium,
-                ...clientBatches.low
-            ];
-
-            if (batch.length === 0) {
-                // Clean up even if batch is empty
-                this.batches.delete(clientId);
-                this.batchStartTimes.delete(clientId);
-                this.metrics.activeBatches--;
-                return;
-            }
-
-            // Update batch size metrics
-            this.metrics.maxBatchSize = Math.max(this.metrics.maxBatchSize, batch.length);
-            this.metrics.minBatchSize = Math.min(this.metrics.minBatchSize, batch.length);
-            this.metrics.totalBatches++;
-            this.metrics.averageBatchSize = 
-                (this.metrics.averageBatchSize * (this.metrics.totalBatches - 1) + batch.length) / 
-                this.metrics.totalBatches;
-
-            // Update batch flush reason metrics
-            this.metrics.batchFlushReasons[reason]++;
-
-            // Update latency metrics
-            const startTime = this.batchStartTimes.get(clientId);
-            if (startTime) {
-                const latency = Date.now() - startTime;
-                this.metrics.batchLatency.total += latency;
-                this.metrics.batchLatency.count++;
-                this.metrics.batchLatency.max = Math.max(this.metrics.batchLatency.max, latency);
-                this.metrics.batchLatency.min = Math.min(this.metrics.batchLatency.min, latency);
-                this.batchStartTimes.delete(clientId);
-            }
-
-            // Clean up client data
-            this.batches.delete(clientId);
-            this.metrics.activeBatches--;
-
-            try {
-                // Compress batch if needed
-                const compressedBatch = await this._compressBatch(batch, PRIORITY_LEVELS.HIGH);
-                // Emit the batch event
-                this.emit('batch', clientId, compressedBatch);
-            } catch (compressionError) {
-                logger.error('Error compressing batch:', { error: compressionError, clientId });
-                this.metrics.errors.compression++;
-                // Emit the original batch if compression fails
-                this.emit('batch', clientId, batch);
-            }
-        } catch (error) {
-            logger.error('Error flushing batch:', { error, clientId });
-            this.metrics.errors.flushBatch++;
-            throw error;
-        }
-    }
-
-    /**
-     * Remove a client's batch and timer
-     * @param {string} clientId - The client identifier
-     */
-    removeClient(clientId) {
-        try {
-            const timer = this.timers.get(clientId);
-            if (timer) {
-                clearTimeout(timer);
-                this.timers.delete(clientId);
-            }
-
-            if (this.batches.has(clientId)) {
-                this._flushBatch(clientId, 'clientDisconnect');
-                this.metrics.activeClients--;
-            }
-
-            this.batches.delete(clientId);
-            this.batchStartTimes.delete(clientId);
-        } catch (error) {
-            logger.error('Error removing client:', { error, clientId });
-            this.metrics.errors.clientDisconnect++;
-            throw error;
-        }
-    }
-
-    /**
-     * Get current metrics
-     * @returns {Object} Current metrics
-     */
-    getMetrics() {
-        return {
-            ...this.metrics,
-            averageLatency: this.metrics.batchLatency.count > 0 ? 
-                this.metrics.batchLatency.total / this.metrics.batchLatency.count : 0
-        };
-    }
-
-    /**
-     * Reset metrics
-     */
-    resetMetrics() {
-        this.metrics = {
-            totalBatches: 0,
-            totalMessages: 0,
-            averageBatchSize: 0,
-            maxBatchSize: 0,
-            minBatchSize: Infinity,
-            batchLatency: {
-                total: 0,
-                count: 0,
-                max: 0,
-                min: Infinity
-            },
-            activeClients: this.batches.size, // Keep current active clients
-            activeBatches: this.batches.size, // Keep current active batches
-            batchFlushReasons: {
-                size: 0,
-                timeout: 0,
-                clientDisconnect: 0
-            },
-            errors: {
-                addMessage: 0,
-                flushBatch: 0,
-                clientDisconnect: 0,
-                compression: 0
-            },
-            performance: {
-                lastAdjustment: Date.now(),
-                currentLoad: 0,
-                targetLoad: 0,
-                adjustmentHistory: []
-            },
-            priorities: {
-                high: { count: 0, averageLatency: 0 },
-                medium: { count: 0, averageLatency: 0 },
-                low: { count: 0, averageLatency: 0 }
-            },
-            compression: {
-                totalCompressed: 0,
-                totalUncompressed: 0,
-                totalBytesSaved: 0,
-                compressionRatio: 0
-            }
-        };
-    }
-
-    async _compressBatch(batch, priority) {
-        try {
-            if (!this.compressionConfig.enabled) return batch;
-
-            const batchSize = JSON.stringify(batch).length;
-            const threshold = this.compressionConfig.priorityThresholds[this._getPriorityKey(priority)];
-
-            if (batchSize < threshold) return batch;
-
-            const compressed = await gzip(JSON.stringify(batch), {
-                level: this.compressionConfig.level
+            // Sort by priority
+            batch.sort((a, b) => {
+                const priorities = { high: 0, medium: 1, low: 2 };
+                return priorities[a.priority] - priorities[b.priority];
             });
 
-            this.metrics.compression.totalCompressed++;
-            this.metrics.compression.totalBytesSaved += (batchSize - compressed.length);
-            this.metrics.compression.compressionRatio = 
-                this.metrics.compression.totalBytesSaved / 
-                (this.metrics.compression.totalCompressed + this.metrics.compression.totalUncompressed);
+            let isCompressed = false;
+            let compressedData = null;
 
-            return {
-                compressed: true,
-                data: compressed
+            if (this.compressionEnabled && batch.length >= this.config.compression.minSize) {
+                try {
+                    const compressed = await this.compressor.compress(batch);
+                    if (compressed.compressed) {
+                        compressedData = compressed.data;
+                        isCompressed = true;
+                        this.metrics.compression.totalCompressed++;
+                        this.metrics.compression.totalBytesSaved += (compressed.originalSize - compressed.compressedSize);
+                        this.metrics.compression.averageCompressionRatio = compressed.compressionRatio;
+                        
+                        // Update compression times
+                        const compressorMetrics = this.compressor.getMetrics();
+                        this.metrics.compression.averageCompressionTimes = compressorMetrics.averageCompressionTimes;
+                    }
+                } catch (error) {
+                    this.metrics.errors.compression++;
+                    logger.error('Compression error', { error, clientId });
+                    // Continue without compression
+                }
+            }
+
+            // Update metrics
+            this.metrics.totalBatches++;
+            this.metrics.totalMessages += batch.length;
+            this.metrics.batchFlushReasons[reason] = (this.metrics.batchFlushReasons[reason] || 0) + 1;
+            this.metrics.maxBatchSize = Math.max(this.metrics.maxBatchSize, batch.length);
+            this.metrics.minBatchSize = Math.min(this.metrics.minBatchSize, batch.length);
+            
+            // Calculate average batch size
+            const currentBatchSize = batch.length;
+            this.metrics.averageBatchSize = (this.metrics.averageBatchSize * (this.metrics.totalBatches - 1) + currentBatchSize) / this.metrics.totalBatches;
+
+            // Calculate latency
+            const latency = Date.now() - this.batchStartTimes.get(clientId);
+            batch.forEach(msg => {
+                this.metrics.priorities[msg.priority].latency += latency;
+            });
+
+            // Clean up
+            this.batches.delete(clientId);
+            this.batchStartTimes.delete(clientId);
+            if (this.timers.has(clientId)) {
+                clearTimeout(this.timers.get(clientId));
+                this.timers.delete(clientId);
+            }
+
+            this.metrics.activeBatches--;
+
+            // Emit batch with consistent format
+            const batchData = {
+                messages: batch,
+                compressed: isCompressed,
+                data: compressedData
             };
+            this.emit('batch', clientId, batchData, isCompressed);
+
+            // Update analytics if enabled and throttled
+            if (this.config.analytics.enabled && this._shouldUpdateAnalytics()) {
+                this._updateAnalytics();
+            }
         } catch (error) {
-            logger.error('Error compressing batch:', { error });
-            this.metrics.errors.compression++;
-            return batch;
+            logger.error('Error flushing batch', { error, clientId });
+            throw error;
         }
     }
 
-    async _decompressBatch(batch) {
+    _shouldUpdateAnalytics() {
+        const now = Date.now();
+        if (!this._lastAnalyticsUpdate) {
+            this._lastAnalyticsUpdate = now;
+            return true;
+        }
+
+        const timeSinceLastUpdate = now - this._lastAnalyticsUpdate;
+        if (timeSinceLastUpdate >= this.config.analytics.interval) {
+            this._lastAnalyticsUpdate = now;
+            return true;
+        }
+
+        return false;
+    }
+
+    async removeClient(clientId) {
         try {
-            if (!batch.compressed) return batch;
-
-            const decompressed = await gunzip(batch.data);
-            return JSON.parse(decompressed.toString());
+            await this._flushBatch(clientId, 'clientDisconnect');
+            this.metrics.activeClients--;
         } catch (error) {
-            logger.error('Error decompressing batch:', { error });
-            this.metrics.errors.compression++;
-            return batch;
+            logger.error('Error removing client', { error, clientId });
+            throw error;
         }
     }
 
-    _getPriorityTimeout(priority) {
-        const priorityKey = this._getPriorityKey(priority);
-        return this.timeoutConfig[priorityKey] || this.batchTimeout;
+    _adjustBatchSize() {
+        const oldSize = this.batchSize;
+        const currentLoad = this.metrics.averageBatchSize / this.batchSize;
+        const targetLoad = this.performanceThreshold;
+        const loadDiff = currentLoad - targetLoad;
+        
+        // Update metrics
+        this.metrics.performance.currentLoad = currentLoad;
+
+        // Adjust batch size based on load
+        if (currentLoad > targetLoad) {
+            this.batchSize = Math.max(this.batchSize * 0.8, this.minBatchSize);
+        } else {
+            this.batchSize = Math.min(this.batchSize * 1.2, this.maxBatchSize);
+        }
+
+        // Update adjustment history
+        this.metrics.performance.adjustmentHistory.push({
+            timestamp: Date.now(),
+            oldSize,
+            newSize: this.batchSize,
+            loadDiff,
+            currentLoad,
+            targetLoad
+        });
+
+        // Keep only the last 10 adjustments
+        if (this.metrics.performance.adjustmentHistory.length > 10) {
+            this.metrics.performance.adjustmentHistory.shift();
+        }
+    }
+
+    enableCompression() {
+        this.compressionEnabled = true;
+    }
+
+    disableCompression() {
+        this.compressionEnabled = false;
+    }
+
+    async stop() {
+        // Clear all timers
+        for (const [clientId, timer] of this.timers.entries()) {
+            clearTimeout(timer);
+            this.timers.delete(clientId);
+        }
+
+        // Flush all remaining batches
+        for (const clientId of this.batches.keys()) {
+            await this._flushBatch(clientId, 'manual');
+        }
+
+        // Stop predictor if exists
+        if (this.predictor) {
+            await this.predictor.stop();
+        }
     }
 }
 
