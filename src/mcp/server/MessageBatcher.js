@@ -1,5 +1,10 @@
 const { EventEmitter } = require('events');
 const logger = require('../../utils/logger');
+const zlib = require('zlib');
+const { promisify } = require('util');
+
+const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
 
 // Priority levels
 const PRIORITY_LEVELS = {
@@ -8,16 +13,43 @@ const PRIORITY_LEVELS = {
     LOW: 2
 };
 
+const DEFAULT_CONFIG = {
+    batchSize: 10,
+    batchTimeout: 100,
+    minBatchSize: 5,
+    maxBatchSize: 50,
+    adaptiveInterval: 60000,
+    performanceThreshold: 0.8,
+    enableAdaptiveSizing: true,
+    compression: {
+        enabled: true,
+        minSize: 1024, // 1KB
+        level: 6,
+        priorityThresholds: {
+            high: 512,    // 512B
+            medium: 1024, // 1KB
+            low: 2048     // 2KB
+        }
+    },
+    timeouts: {
+        high: 50,    // 50ms
+        medium: 100, // 100ms
+        low: 200     // 200ms
+    }
+};
+
 class MessageBatcher extends EventEmitter {
     constructor(config = {}) {
         super();
-        this.batchSize = config.batchSize || 10;
-        this.batchTimeout = config.batchTimeout || 100; // ms
-        this.minBatchSize = config.minBatchSize || 5;
-        this.maxBatchSize = config.maxBatchSize || 50;
-        this.adaptiveInterval = config.adaptiveInterval || 60000; // 1 minute
-        this.performanceThreshold = config.performanceThreshold || 0.8; // 80% target performance
-        this.enableAdaptiveSizing = config.enableAdaptiveSizing !== false; // Enable by default
+        this.batchSize = config.batchSize || DEFAULT_CONFIG.batchSize;
+        this.batchTimeout = config.batchTimeout || DEFAULT_CONFIG.batchTimeout;
+        this.minBatchSize = config.minBatchSize || DEFAULT_CONFIG.minBatchSize;
+        this.maxBatchSize = config.maxBatchSize || DEFAULT_CONFIG.maxBatchSize;
+        this.adaptiveInterval = config.adaptiveInterval || DEFAULT_CONFIG.adaptiveInterval;
+        this.performanceThreshold = config.performanceThreshold || DEFAULT_CONFIG.performanceThreshold;
+        this.enableAdaptiveSizing = config.enableAdaptiveSizing !== false;
+        this.compressionConfig = config.compression || DEFAULT_CONFIG.compression;
+        this.timeoutConfig = config.timeouts || DEFAULT_CONFIG.timeouts;
         this.batches = new Map(); // clientId -> { high: [], medium: [], low: [] }
         this.timers = new Map(); // clientId -> timer
         this.batchStartTimes = new Map(); // clientId -> startTime
@@ -44,7 +76,8 @@ class MessageBatcher extends EventEmitter {
             errors: {
                 addMessage: 0,
                 flushBatch: 0,
-                clientDisconnect: 0
+                clientDisconnect: 0,
+                compression: 0
             },
             performance: {
                 lastAdjustment: Date.now(),
@@ -56,6 +89,12 @@ class MessageBatcher extends EventEmitter {
                 high: { count: 0, averageLatency: 0 },
                 medium: { count: 0, averageLatency: 0 },
                 low: { count: 0, averageLatency: 0 }
+            },
+            compression: {
+                totalCompressed: 0,
+                totalUncompressed: 0,
+                totalBytesSaved: 0,
+                compressionRatio: 0
             }
         };
 
@@ -213,7 +252,7 @@ class MessageBatcher extends EventEmitter {
      * @param {Object} message - The message to batch
      * @param {number} priority - Message priority (0: high, 1: medium, 2: low)
      */
-    addMessage(clientId, message, priority = PRIORITY_LEVELS.MEDIUM) {
+    async addMessage(clientId, message, priority = PRIORITY_LEVELS.MEDIUM) {
         try {
             if (!message) {
                 throw new Error('Message cannot be null or undefined');
@@ -231,7 +270,7 @@ class MessageBatcher extends EventEmitter {
                     low: []
                 });
                 this.batchStartTimes.set(clientId, Date.now());
-                this._startBatchTimer(clientId);
+                this._startBatchTimer(clientId, priority);
                 this.metrics.activeClients++;
                 this.metrics.activeBatches++;
             }
@@ -245,7 +284,7 @@ class MessageBatcher extends EventEmitter {
             // Check if we should flush based on total messages across all priorities
             const totalMessages = Object.values(clientBatches).reduce((sum, batch) => sum + batch.length, 0);
             if (totalMessages >= this.batchSize) {
-                this._flushBatch(clientId, 'size');
+                await this._flushBatch(clientId, 'size');
             }
         } catch (error) {
             logger.error('Error adding message to batch:', { error, clientId });
@@ -274,7 +313,7 @@ class MessageBatcher extends EventEmitter {
      * @private
      * @param {string} clientId - The client identifier
      */
-    _startBatchTimer(clientId) {
+    _startBatchTimer(clientId, priority) {
         // Clear any existing timer
         const existingTimer = this.timers.get(clientId);
         if (existingTimer) {
@@ -282,9 +321,10 @@ class MessageBatcher extends EventEmitter {
             this.timers.delete(clientId);
         }
 
+        const timeout = this._getPriorityTimeout(priority);
         const timer = setTimeout(() => {
             this._flushBatch(clientId, 'timeout');
-        }, this.batchTimeout);
+        }, timeout);
 
         this.timers.set(clientId, timer);
     }
@@ -295,7 +335,7 @@ class MessageBatcher extends EventEmitter {
      * @param {string} clientId - The client identifier
      * @param {string} reason - The reason for flushing
      */
-    _flushBatch(clientId, reason = 'size') {
+    async _flushBatch(clientId, reason = 'size') {
         try {
             const clientBatches = this.batches.get(clientId);
             if (!clientBatches) return;
@@ -348,8 +388,17 @@ class MessageBatcher extends EventEmitter {
             this.batches.delete(clientId);
             this.metrics.activeBatches--;
 
-            // Emit the batch event
-            this.emit('batch', clientId, batch);
+            try {
+                // Compress batch if needed
+                const compressedBatch = await this._compressBatch(batch, PRIORITY_LEVELS.HIGH);
+                // Emit the batch event
+                this.emit('batch', clientId, compressedBatch);
+            } catch (compressionError) {
+                logger.error('Error compressing batch:', { error: compressionError, clientId });
+                this.metrics.errors.compression++;
+                // Emit the original batch if compression fails
+                this.emit('batch', clientId, batch);
+            }
         } catch (error) {
             logger.error('Error flushing batch:', { error, clientId });
             this.metrics.errors.flushBatch++;
@@ -421,7 +470,8 @@ class MessageBatcher extends EventEmitter {
             errors: {
                 addMessage: 0,
                 flushBatch: 0,
-                clientDisconnect: 0
+                clientDisconnect: 0,
+                compression: 0
             },
             performance: {
                 lastAdjustment: Date.now(),
@@ -433,8 +483,62 @@ class MessageBatcher extends EventEmitter {
                 high: { count: 0, averageLatency: 0 },
                 medium: { count: 0, averageLatency: 0 },
                 low: { count: 0, averageLatency: 0 }
+            },
+            compression: {
+                totalCompressed: 0,
+                totalUncompressed: 0,
+                totalBytesSaved: 0,
+                compressionRatio: 0
             }
         };
+    }
+
+    async _compressBatch(batch, priority) {
+        try {
+            if (!this.compressionConfig.enabled) return batch;
+
+            const batchSize = JSON.stringify(batch).length;
+            const threshold = this.compressionConfig.priorityThresholds[this._getPriorityKey(priority)];
+
+            if (batchSize < threshold) return batch;
+
+            const compressed = await gzip(JSON.stringify(batch), {
+                level: this.compressionConfig.level
+            });
+
+            this.metrics.compression.totalCompressed++;
+            this.metrics.compression.totalBytesSaved += (batchSize - compressed.length);
+            this.metrics.compression.compressionRatio = 
+                this.metrics.compression.totalBytesSaved / 
+                (this.metrics.compression.totalCompressed + this.metrics.compression.totalUncompressed);
+
+            return {
+                compressed: true,
+                data: compressed
+            };
+        } catch (error) {
+            logger.error('Error compressing batch:', { error });
+            this.metrics.errors.compression++;
+            return batch;
+        }
+    }
+
+    async _decompressBatch(batch) {
+        try {
+            if (!batch.compressed) return batch;
+
+            const decompressed = await gunzip(batch.data);
+            return JSON.parse(decompressed.toString());
+        } catch (error) {
+            logger.error('Error decompressing batch:', { error });
+            this.metrics.errors.compression++;
+            return batch;
+        }
+    }
+
+    _getPriorityTimeout(priority) {
+        const priorityKey = this._getPriorityKey(priority);
+        return this.timeoutConfig[priorityKey] || this.batchTimeout;
     }
 }
 

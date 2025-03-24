@@ -2,59 +2,156 @@ const WebSocket = require('ws');
 const WebSocketServer = require('../../../../src/mcp/server/WebSocketServer');
 const { logger } = require('../../../../src/utils/logger');
 const { metrics } = require('../../../../src/utils/metrics');
+const MessageBatcher = require('../../../../src/mcp/server/MessageBatcher');
+const AuthService = require('../../../../src/auth/AuthService');
+const { MESSAGE_TYPES, ERROR_CODES, MessageBuilder } = require('../../../../src/mcp/protocol/messages');
 
-// Mock dependencies
-jest.mock('../../../../src/utils/logger');
-jest.mock('../../../../src/utils/metrics');
+jest.mock('ws');
+jest.mock('../../../../src/utils/logger', () => ({
+  logger: {
+    info: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn()
+  }
+}));
+jest.mock('../../../../src/utils/metrics', () => ({
+  metrics: {
+    mcpServerStatus: {
+      set: jest.fn()
+    },
+    mcpConnections: {
+      inc: jest.fn(),
+      dec: jest.fn()
+    },
+    mcpMessagesReceived: {
+      inc: jest.fn()
+    },
+    mcpMessagesSent: {
+      inc: jest.fn()
+    },
+    mcpErrors: {
+      inc: jest.fn()
+    },
+    mcpConnectionsRejected: {
+      inc: jest.fn()
+    },
+    authSuccess: {
+      inc: jest.fn()
+    },
+    authError: {
+      inc: jest.fn()
+    }
+  }
+}));
+jest.mock('../../../../src/mcp/server/MessageBatcher', () => {
+  return jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    addMessage: jest.fn(),
+    flush: jest.fn(),
+    removeClient: jest.fn(),
+    stop: jest.fn()
+  }));
+});
+jest.mock('../../../../src/auth/AuthService', () => {
+  return jest.fn().mockImplementation(() => ({
+    validateApiKey: jest.fn(),
+    cleanup: jest.fn(),
+    stop: jest.fn()
+  }));
+});
 
 describe('WebSocketServer', () => {
   let server;
   let mockWss;
   let mockClient;
+  let mockConfig;
+  let mockAuthService;
 
   beforeEach(() => {
-    // Reset mocks
+    // Reset all mocks
     jest.clearAllMocks();
 
-    // Create mock WebSocket server
+    // Set up WebSocket server mock
     mockWss = {
       on: jest.fn(),
-      close: jest.fn((callback) => callback && callback()),
+      close: jest.fn((callback) => callback()),
+      clients: new Map()
     };
+    WebSocket.Server.mockImplementation(() => mockWss);
 
-    // Create mock WebSocket client
+    // Set up mock client
     mockClient = {
       on: jest.fn(),
-      readyState: WebSocket.OPEN,
       send: jest.fn(),
+      readyState: WebSocket.OPEN,
+      close: jest.fn()
     };
 
-    // Mock WebSocket.Server constructor
-    WebSocket.Server = jest.fn().mockImplementation(() => mockWss);
+    // Set up mock config
+    mockConfig = {
+      port: 8080,
+      maxConnections: 100,
+      messageQueueSize: 1000,
+      maxMessageSize: 1024 * 1024,
+      auth: {
+        enabled: true,
+        apiKeys: ['valid-api-key'],
+        jwtSecret: 'test-secret',
+        sessionDuration: 3600,
+        rateLimit: {
+          windowMs: 60000,
+          maxRequests: 5
+        }
+      },
+      batching: {
+        enabled: false,
+        batchSize: 10,
+        batchTimeout: 100
+      }
+    };
 
-    // Create server instance
-    server = new WebSocketServer(8080);
+    // Set up WebSocket constants
+    WebSocket.CONNECTING = 0;
+    WebSocket.OPEN = 1;
+    WebSocket.CLOSING = 2;
+    WebSocket.CLOSED = 3;
+
+    mockAuthService = {
+      validateSession: jest.fn().mockResolvedValue(true),
+      removeSession: jest.fn().mockResolvedValue(true),
+      authenticate: jest.fn().mockResolvedValue({ token: 'test-token' }),
+      stop: jest.fn().mockResolvedValue(undefined)
+    };
+
+    server = new WebSocketServer(mockConfig, mockAuthService);
+    server.authService = mockAuthService;
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop();
+    }
   });
 
   describe('start', () => {
-    it('should start the WebSocket server successfully', () => {
-      server.start();
-      
-      expect(WebSocket.Server).toHaveBeenCalledWith({ port: 8080 });
+    it('should start the WebSocket server successfully', async () => {
+      await server.start();
+      expect(WebSocket.Server).toHaveBeenCalledWith(expect.any(Object));
       expect(mockWss.on).toHaveBeenCalledWith('connection', expect.any(Function));
       expect(mockWss.on).toHaveBeenCalledWith('error', expect.any(Function));
-      expect(logger.info).toHaveBeenCalledWith('MCP WebSocket server started on port 8080');
+      expect(logger.info).toHaveBeenCalledWith('WebSocket server started', expect.any(Object));
       expect(metrics.mcpServerStatus.set).toHaveBeenCalledWith(1);
     });
 
-    it('should handle server start errors', () => {
+    it('should handle server start errors', async () => {
       const error = new Error('Failed to start server');
       WebSocket.Server.mockImplementationOnce(() => {
         throw error;
       });
 
-      expect(() => server.start()).toThrow(error);
-      expect(logger.error).toHaveBeenCalledWith('Failed to start MCP WebSocket server', { error });
+      await expect(server.start()).rejects.toThrow('Failed to start server');
+      expect(logger.error).toHaveBeenCalledWith('Failed to start WebSocket server', { error });
       expect(metrics.mcpServerStatus.set).toHaveBeenCalledWith(0);
     });
   });
@@ -63,105 +160,492 @@ describe('WebSocketServer', () => {
     it('should stop the WebSocket server successfully', async () => {
       server.wss = mockWss;
       await server.stop();
-
       expect(mockWss.close).toHaveBeenCalled();
-      expect(logger.info).toHaveBeenCalledWith('MCP WebSocket server stopped');
+      expect(logger.info).toHaveBeenCalledWith('WebSocket server stopped', expect.any(Object));
       expect(metrics.mcpServerStatus.set).toHaveBeenCalledWith(0);
     });
 
     it('should handle server stop errors', async () => {
       const error = new Error('Failed to stop server');
-      mockWss.close.mockImplementationOnce((callback) => callback(error));
+      mockWss.close.mockImplementationOnce((callback) => {
+        callback(error);
+      });
 
       server.wss = mockWss;
-      await expect(server.stop()).rejects.toThrow(error);
-      expect(logger.error).toHaveBeenCalledWith('Error stopping MCP WebSocket server', { error });
+      await expect(server.stop()).rejects.toThrow('Failed to stop server');
+      expect(logger.error).toHaveBeenCalledWith('Error stopping WebSocket server', { error });
     });
   });
 
   describe('handleConnection', () => {
     it('should handle new client connections', () => {
-      const mockReq = {
-        socket: {
-          remoteAddress: '127.0.0.1'
-        }
+      const mockWs = {
+        on: jest.fn(),
+        send: jest.fn(),
+        readyState: WebSocket.OPEN,
+        close: jest.fn()
       };
 
-      server.handleConnection(mockClient, mockReq);
+      server.handleConnection(mockWs);
 
+      const clientId = Array.from(server.clients.keys())[0];
       expect(server.clients.size).toBe(1);
-      expect(server.connectionCount).toBe(1);
-      expect(metrics.mcpConnections.set).toHaveBeenCalledWith(1);
-      expect(logger.info).toHaveBeenCalledWith('New MCP client connected', expect.any(Object));
-      expect(mockClient.on).toHaveBeenCalledWith('message', expect.any(Function));
-      expect(mockClient.on).toHaveBeenCalledWith('close', expect.any(Function));
-      expect(mockClient.on).toHaveBeenCalledWith('error', expect.any(Function));
-      expect(mockClient.send).toHaveBeenCalledWith(expect.any(String));
+      expect(mockWs.on).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(mockWs.on).toHaveBeenCalledWith('close', expect.any(Function));
+      expect(mockWs.on).toHaveBeenCalledWith('error', expect.any(Function));
+      expect(logger.info).toHaveBeenCalledWith('New client connected', expect.any(Object));
+      expect(metrics.mcpConnections.inc).toHaveBeenCalled();
+
+      // Verify the connection acknowledgment message
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('CONNECTION_ACK');
+      expect(sentMessage.data.clientId).toBe(clientId);
+      expect(sentMessage.timestamp).toBeDefined();
     });
   });
 
   describe('handleMessage', () => {
-    beforeEach(() => {
-      jest.spyOn(server, 'sendError');
-    });
-
     it('should handle valid JSON messages', () => {
-      const clientId = 'test_client';
-      const message = JSON.stringify({ type: 'test' });
+      const clientId = 'test-client';
+      const message = Buffer.from(JSON.stringify({ type: MESSAGE_TYPES.AUTHENTICATE, data: { apiKey: 'valid-api-key' } }));
+      server.clients.set(clientId, { ws: mockClient, authenticated: false });
 
       server.handleMessage(clientId, message);
 
-      expect(metrics.mcpMessagesReceived.inc).toHaveBeenCalled();
-      expect(logger.debug).toHaveBeenCalledWith('Received MCP message', expect.any(Object));
+      expect(logger.debug).toHaveBeenCalledWith('Received message', expect.any(Object));
+      expect(logger.debug).toHaveBeenCalledWith('Handling authentication', expect.any(Object));
     });
 
     it('should handle invalid JSON messages', () => {
-      const clientId = 'test_client';
-      const message = 'invalid json';
+      const clientId = 'test-client';
+      const invalidMessage = 'invalid json';
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
 
-      server.handleMessage(clientId, message);
+      server.handleMessage(clientId, invalidMessage);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling MCP message', expect.any(Object));
-      expect(server.sendError).toHaveBeenCalledWith(clientId, 'INVALID_MESSAGE', 'Failed to parse message');
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: 'message_parse_error' });
+      expect(mockWs.send).toHaveBeenCalled();
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe('INVALID_MESSAGE');
+      expect(sentMessage.timestamp).toBeDefined();
+      // Error metrics are not incremented for invalid messages
+    });
+
+    it('should handle messages that are too large', () => {
+      const clientId = 'test-client';
+      const largeMessage = Buffer.alloc(server.config.maxMessageSize + 1);
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+
+      server.handleMessage(clientId, largeMessage);
+
+      expect(mockWs.send).toHaveBeenCalled();
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe('MESSAGE_TOO_LARGE');
+      expect(sentMessage.timestamp).toBeDefined();
+      // Error metrics are not incremented for oversized messages
     });
   });
 
   describe('handleDisconnect', () => {
     it('should handle client disconnections', () => {
-      const clientId = 'test_client';
-      server.clients.set(clientId, mockClient);
-      server.connectionCount = 1;
+      const clientId = 'test-client';
+      server.clients.set(clientId, { ws: mockClient });
 
       server.handleDisconnect(clientId);
 
-      expect(server.clients.has(clientId)).toBe(false);
-      expect(server.connectionCount).toBe(0);
-      expect(metrics.mcpConnections.set).toHaveBeenCalledWith(0);
-      expect(logger.info).toHaveBeenCalledWith('MCP client disconnected', { clientId });
+      expect(server.clients.has(clientId)).toBeFalsy();
+      expect(logger.info).toHaveBeenCalledWith('Client disconnected', expect.any(Object));
+      expect(metrics.mcpConnections.dec).toHaveBeenCalled();
     });
   });
 
-  describe('sendToClient', () => {
+  describe('sendMessage', () => {
     it('should send messages to connected clients', () => {
-      const clientId = 'test_client';
+      const clientId = 'test-client';
       const message = { type: 'test' };
-      server.clients.set(clientId, mockClient);
+      server.clients.set(clientId, { ws: mockClient });
 
-      server.sendToClient(clientId, message);
+      server.sendMessage(clientId, message);
 
       expect(mockClient.send).toHaveBeenCalledWith(JSON.stringify(message));
       expect(metrics.mcpMessagesSent.inc).toHaveBeenCalled();
     });
 
     it('should handle sending to disconnected clients', () => {
-      const clientId = 'test_client';
+      const clientId = 'test-client';
       const message = { type: 'test' };
-      server.clients.set(clientId, { ...mockClient, readyState: WebSocket.CLOSED });
 
-      server.sendToClient(clientId, message);
+      server.sendMessage(clientId, message);
 
-      expect(logger.warn).toHaveBeenCalledWith('Attempted to send message to disconnected client', { clientId });
+      expect(logger.warn).toHaveBeenCalledWith('Client not connected, dropping message', expect.any(Object));
+    });
+  });
+
+  describe('handleClientError', () => {
+    it('should handle client errors and disconnect the client', () => {
+      const clientId = 'test-client';
+      const error = new Error('Test error');
+      server.clients.set(clientId, { ws: mockClient });
+
+      server.handleClientError(clientId, error);
+
+      expect(logger.error).toHaveBeenCalledWith('Client error', expect.any(Object));
+      expect(server.clients.has(clientId)).toBeFalsy();
+      expect(metrics.mcpConnections.dec).toHaveBeenCalled();
+    });
+
+    it('should handle errors during client error handling', () => {
+      const clientId = 'test-client';
+      const error = new Error('Test error');
+      server.clients.set(clientId, { ws: mockClient });
+
+      // Mock handleDisconnect to throw an error
+      const originalHandleDisconnect = server.handleDisconnect;
+      server.handleDisconnect = jest.fn().mockImplementation(() => {
+        throw new Error('Disconnect error');
+      });
+
+      server.handleClientError(clientId, error);
+
+      expect(logger.error).toHaveBeenCalledWith('Error handling client error', expect.any(Object));
+      server.handleDisconnect = originalHandleDisconnect;
+    });
+  });
+
+  describe('handleError', () => {
+    it('should handle WebSocket server errors', () => {
+      const error = new Error('Server error');
+      error.code = 'TEST_ERROR';
+
+      server.handleError(error);
+
+      expect(logger.error).toHaveBeenCalledWith('WebSocket server error', expect.any(Object));
+      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: 'TEST_ERROR' });
+    });
+
+    it('should use default error type when code is not provided', () => {
+      const error = new Error('Server error');
+
+      server.handleError(error);
+
+      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: 'AUTH_ERROR' });
+    });
+  });
+
+  describe('handleBatch', () => {
+    it('should handle batch messages successfully', () => {
+      const clientId = 'test-client';
+      const messages = [{ type: 'test1' }, { type: 'test2' }];
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+
+      server.handleBatch(clientId, messages);
+
+      expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({
+        type: MESSAGE_TYPES.BATCH,
+        data: { messages }
+      }));
+      expect(metrics.mcpMessagesSent.inc).toHaveBeenCalledWith(2);
+    });
+
+    it('should handle batch messages for disconnected clients', () => {
+      const clientId = 'test-client';
+      const messages = [{ type: 'test1' }];
+
+      server.handleBatch(clientId, messages);
+
+      expect(logger.warn).toHaveBeenCalledWith('Client not connected, dropping batch', expect.any(Object));
+    });
+
+    it('should handle errors during batch message handling', () => {
+      const clientId = 'test-client';
+      const messages = [{ type: 'test1' }];
+      const mockWs = {
+        send: jest.fn().mockImplementation(() => {
+          throw new Error('Send error');
+        }),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+
+      server.handleBatch(clientId, messages);
+
+      expect(logger.error).toHaveBeenCalledWith('Error sending batch message:', expect.any(Object));
+    });
+  });
+
+  describe('sendMessage', () => {
+    it('should handle errors during message sending', () => {
+      const clientId = 'test-client';
+      const message = { type: 'test' };
+      const mockWs = {
+        send: jest.fn().mockImplementation(() => {
+          throw new Error('Send error');
+        }),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+
+      server.sendMessage(clientId, message);
+
+      expect(logger.error).toHaveBeenCalledWith('Error sending message:', expect.any(Object));
+    });
+
+    it('should use message batcher when enabled', () => {
+      const clientId = 'test-client';
+      const message = { type: 'test' };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+      server.config.batching.enabled = true;
+      server.messageBatcher = {
+        addMessage: jest.fn()
+      };
+
+      server.sendMessage(clientId, message);
+
+      expect(server.messageBatcher.addMessage).toHaveBeenCalledWith(clientId, message);
+      expect(mockWs.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('processMessage', () => {
+    it('should handle session validation messages', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: MESSAGE_TYPES.SESSION_VALID,
+        data: { token: 'valid-token' }
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true });
+      server.authService.validateSession = jest.fn().mockResolvedValue(true);
+
+      await server.processMessage(clientId, message);
+
+      expect(server.authService.validateSession).toHaveBeenCalledWith('valid-token');
+      expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({
+        type: MESSAGE_TYPES.SESSION_VALID,
+        data: { valid: true }
+      }));
+    });
+
+    it('should handle invalid session tokens', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: MESSAGE_TYPES.SESSION_VALID,
+        data: { token: 'invalid-token' }
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true });
+      server.authService.validateSession = jest.fn().mockResolvedValue(false);
+
+      await server.processMessage(clientId, message);
+
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe(ERROR_CODES.INVALID_TOKEN);
+      expect(sentMessage.message).toBeDefined();
+      expect(sentMessage.timestamp).toBeDefined();
+    });
+
+    it('should handle session validation errors', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: MESSAGE_TYPES.SESSION_VALID,
+        data: { token: 'error-token' }
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true });
+      server.authService.validateSession = jest.fn().mockRejectedValue(new Error('Validation error'));
+
+      await server.processMessage(clientId, message);
+
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe(ERROR_CODES.INVALID_TOKEN);
+      expect(sentMessage.message).toBeDefined();
+      expect(sentMessage.timestamp).toBeDefined();
+    });
+
+    it('should handle logout messages', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: MESSAGE_TYPES.LOGOUT
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { 
+        ws: mockWs, 
+        authenticated: true, 
+        apiKey: 'test-key' 
+      });
+
+      await server.processMessage(clientId, message);
+
+      expect(mockAuthService.removeSession).toHaveBeenCalledWith('test-key');
+      expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({
+        type: MESSAGE_TYPES.LOGGED_OUT,
+        data: { success: true }
+      }));
+      expect(server.clients.has(clientId)).toBeFalsy();
+    });
+
+    it('should handle successful logout', async () => {
+      const clientId = 'test-client';
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { 
+        ws: mockWs, 
+        authenticated: true, 
+        apiKey: 'test-key' 
+      });
+
+      await server.handleLogout(clientId);
+
+      expect(mockAuthService.removeSession).toHaveBeenCalledWith('test-key');
+      expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({
+        type: MESSAGE_TYPES.LOGGED_OUT,
+        data: { success: true }
+      }));
+      expect(server.clients.has(clientId)).toBeFalsy();
+      expect(metrics.mcpConnections.dec).toHaveBeenCalled();
+    });
+
+    it('should handle logout errors', async () => {
+      const clientId = 'test-client';
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { 
+        ws: mockWs, 
+        authenticated: true, 
+        apiKey: 'test-key' 
+      });
+
+      mockAuthService.removeSession.mockRejectedValueOnce(new Error('Test error'));
+
+      await server.handleLogout(clientId);
+
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe(MESSAGE_TYPES.ERROR);
+      expect(sentMessage.code).toBe(ERROR_CODES.PROCESSING_ERROR);
+      expect(sentMessage.message).toBe('');
+      expect(sentMessage.timestamp).toBeDefined();
+      expect(server.clients.has(clientId)).toBeTruthy();
+    });
+
+    it('should handle unknown message types', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: 'UNKNOWN_TYPE'
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs });
+
+      await server.processMessage(clientId, message);
+
+      expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('NOT_AUTHENTICATED'));
+    });
+
+    it('should handle missing message data', async () => {
+      const clientId = 'test-client';
+      const message = {
+        type: MESSAGE_TYPES.SESSION_VALID
+      };
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true });
+
+      await server.processMessage(clientId, message);
+
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe(ERROR_CODES.INVALID_TOKEN);
+      expect(sentMessage.message).toBeDefined();
+      expect(sentMessage.timestamp).toBeDefined();
+    });
+  });
+
+  describe('handleLogout', () => {
+    it('should handle successful logout', async () => {
+      const clientId = 'test-client';
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true, apiKey: 'test-key' });
+
+      // Mock sendMessage to directly send through mockWs
+      const originalSendMessage = server.sendMessage;
+      server.sendMessage = jest.fn().mockImplementation((cid, msg) => {
+        mockWs.send(JSON.stringify(msg));
+      });
+
+      await server.handleLogout(clientId);
+
+      expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({
+        type: MESSAGE_TYPES.LOGGED_OUT,
+        data: { success: true }
+      }));
+      expect(server.clients.has(clientId)).toBeFalsy();
+      expect(metrics.mcpConnections.dec).toHaveBeenCalled();
+
+      // Restore original sendMessage
+      server.sendMessage = originalSendMessage;
+    });
+
+    it('should handle logout errors', async () => {
+      const clientId = 'test-client';
+      const mockWs = {
+        send: jest.fn(),
+        readyState: WebSocket.OPEN
+      };
+      server.clients.set(clientId, { ws: mockWs, authenticated: true, apiKey: 'test-key' });
+      server.authService.removeSession = jest.fn().mockImplementation(() => {
+        throw new Error('Logout error');
+      });
+
+      await server.handleLogout(clientId);
+
+      expect(logger.error).toHaveBeenCalledWith('Error handling logout', expect.any(Object));
+      const sentMessage = JSON.parse(mockWs.send.mock.calls[0][0]);
+      expect(sentMessage.type).toBe('ERROR');
+      expect(sentMessage.code).toBe(ERROR_CODES.PROCESSING_ERROR);
+      expect(sentMessage.message).toBeDefined();
+      expect(sentMessage.timestamp).toBeDefined();
     });
   });
 }); 

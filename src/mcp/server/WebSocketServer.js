@@ -76,9 +76,11 @@ class WebSocketServer {
                     maxConnections: this.config.maxConnections
                 });
 
+                metrics.mcpServerStatus.set(1);
                 resolve();
             } catch (error) {
                 logger.error('Failed to start WebSocket server', { error });
+                metrics.mcpServerStatus.set(0);
                 reject(error);
             }
         });
@@ -305,16 +307,16 @@ class WebSocketServer {
             }
 
             if (client.authenticated) {
-                this.authService.removeSession(client.apiKey);
+                await this.authService.removeSession(client.apiKey);
             }
-
-            this.clients.delete(clientId);
-            metrics.mcpConnections.dec();
 
             this.sendMessage(clientId, {
                 type: MESSAGE_TYPES.LOGGED_OUT,
                 data: { success: true }
             });
+
+            this.clients.delete(clientId);
+            metrics.mcpConnections.dec();
         } catch (error) {
             logger.error('Error handling logout', { error, clientId });
             this.sendMessage(clientId, MessageBuilder.buildError(ERROR_CODES.PROCESSING_ERROR));
@@ -382,70 +384,47 @@ class WebSocketServer {
         return Math.random().toString(36).substring(2, 15);
     }
 
-    async stop(force = false) {
-        logger.info('Stopping WebSocket server');
+    stop() {
+        return new Promise((resolve, reject) => {
+            if (!this.wss) {
+                resolve();
+                return;
+            }
 
-        this.isShuttingDown = true;
+            this.isShuttingDown = true;
 
-        // Clear any existing timers
-        if (this.cleanupInterval) {
-            clearInterval(this.cleanupInterval);
-            this.cleanupInterval = null;
-        }
-
-        // Close all client connections
-        const closePromises = Array.from(this.clients.entries()).map(([clientId, client]) => {
-            return new Promise((resolve) => {
-                try {
-                    if (client.ws && client.ws.readyState === WebSocket.OPEN) {
-                        client.ws.once('close', resolve);
-                        client.ws.close(1000, 'Server shutting down');
-                    } else {
-                        resolve();
-                    }
-                } catch (error) {
-                    logger.error('Error closing client connection', { error: error.message || error, clientId });
-                    resolve();
+            // Close all client connections
+            for (const [clientId, client] of this.clients) {
+                if (client.ws.readyState === WebSocket.OPEN) {
+                    client.ws.close(1000, 'Server shutting down');
                 }
+            }
+
+            // Stop message batcher if enabled
+            if (this.messageBatcher) {
+                this.messageBatcher.stop();
+            }
+
+            // Stop auth service
+            this.authService.stop();
+
+            // Close WebSocket server
+            this.wss.close((error) => {
+                if (error) {
+                    logger.error('Error stopping WebSocket server', { error });
+                    metrics.mcpServerStatus.set(0);
+                    reject(new Error('Failed to stop server'));
+                    return;
+                }
+
+                logger.info('WebSocket server stopped', {
+                    port: this.config.port
+                });
+
+                metrics.mcpServerStatus.set(0);
+                resolve();
             });
         });
-
-        // Wait for all clients to close or force close after 1 second
-        if (force) {
-            await new Promise(resolve => {
-                const forceTimeout = setTimeout(() => {
-                    this.clients.clear();
-                    if (this.wss) {
-                        this.wss.close(() => {
-                            this.wss = null;
-                            clearTimeout(forceTimeout);
-                            resolve();
-                        });
-                    } else {
-                        clearTimeout(forceTimeout);
-                        resolve();
-                    }
-                }, 1000);
-            });
-        } else {
-            await Promise.all(closePromises);
-        }
-
-        // Clear clients map
-        this.clients.clear();
-
-        // Close server
-        if (this.wss) {
-            await new Promise((resolve) => {
-                this.wss.close(() => {
-                    this.wss = null;
-                    resolve();
-                });
-            });
-        }
-
-        logger.info('WebSocket server stopped', { timestamp: new Date().toISOString() });
-        metrics.mcpServerStatus.set(0);
     }
 
     /**
