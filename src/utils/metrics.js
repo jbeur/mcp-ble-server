@@ -1,4 +1,4 @@
-const { Registry, Counter, Gauge, Histogram } = require('prom-client');
+const { Registry, Counter, Gauge, Histogram, collectDefaultMetrics } = require('prom-client');
 
 const registry = new Registry();
 
@@ -186,7 +186,7 @@ const metrics = {
 
   // Connection metrics
   mcpActiveConnections: new Gauge({
-    name: 'mcp_active_connections',
+    name: 'mcp_websocket_connections',
     help: 'Number of active WebSocket connections'
   }),
 
@@ -216,7 +216,7 @@ Object.values(metrics).forEach(metric => {
 });
 
 // Add default metrics (CPU, memory, etc.)
-prometheus.collectDefaultMetrics({ register });
+collectDefaultMetrics({ register: registry });
 
 module.exports = {
   registry,
