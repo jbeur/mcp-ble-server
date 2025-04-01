@@ -52,11 +52,34 @@ class BLEService extends EventEmitter {
 
   async cleanup() {
     try {
+      // Stop scanning
       if (this.isScanning) {
         await this.stopScanning();
       }
+
+      // Disconnect all devices
+      const disconnectPromises = Array.from(this.connectedDevices.keys()).map(deviceId => 
+        this.disconnectDevice(deviceId)
+      );
+      await Promise.all(disconnectPromises);
+
+      // Clean up mock devices in test environment
+      this.discoveredDevices.forEach(device => {
+        if (typeof device.cleanup === 'function') {
+          device.cleanup();
+        }
+      });
+
+      // Clear device maps
+      this.discoveredDevices.clear();
+      this.connectedDevices.clear();
+
+      // Remove noble listeners
       noble.removeListener('stateChange', this.handleStateChange);
       noble.removeListener('discover', this.handleDeviceDiscover);
+
+      // Remove all event listeners from this instance
+      this.removeAllListeners();
     } catch (error) {
       logger.error('Failed to cleanup BLE service:', error.message);
       throw new BLEScanError('Failed to cleanup BLE service', error);
@@ -120,9 +143,7 @@ class BLEService extends EventEmitter {
         this.connectedDevices.set(deviceId, device);
         logger.info('Connected to device:', deviceId);
 
-        if (this.autoReconnect) {
-          device.on('disconnect', () => this.handleDeviceDisconnect(deviceId));
-        }
+        device.once('disconnect', () => this.handleDeviceDisconnect(deviceId));
       } catch (error) {
         if (error.message === 'Connection timeout') {
           throw error;
@@ -133,14 +154,17 @@ class BLEService extends EventEmitter {
   }
 
   handleDeviceDisconnect = async (deviceId) => {
-    this.connectedDevices.delete(deviceId);
-    logger.info('Device disconnected:', deviceId);
+    const device = this.connectedDevices.get(deviceId);
+    if (device) {
+      this.connectedDevices.delete(deviceId);
+      logger.info('Device disconnected:', deviceId);
 
-    if (this.autoReconnect) {
-      try {
-        await this.connectToDevice(deviceId);
-      } catch (error) {
-        logger.error('Failed to reconnect to device:', error.message);
+      if (this.autoReconnect) {
+        try {
+          await this.connectToDevice(deviceId);
+        } catch (error) {
+          logger.error('Failed to reconnect to device:', error.message);
+        }
       }
     }
   }
@@ -153,22 +177,21 @@ class BLEService extends EventEmitter {
 
     return this.withRetry(async () => {
       try {
-        const service = await device.discoverService(serviceId);
-        if (!service) {
+        const service = await device.discoverServices();
+        const targetService = service.find(s => s.uuid === serviceId);
+        if (!targetService) {
           throw new BLECharacteristicError('Service not found', deviceId, characteristicId);
         }
 
-        const characteristic = await service.discoverCharacteristic(characteristicId);
-        if (!characteristic) {
+        const characteristics = await targetService.discoverCharacteristics();
+        const targetCharacteristic = characteristics.find(c => c.uuid === characteristicId);
+        if (!targetCharacteristic) {
           throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
         }
 
-        const value = await characteristic.read();
+        const value = await targetCharacteristic.read();
         return value;
       } catch (error) {
-        if (error instanceof BLECharacteristicError) {
-          throw error;
-        }
         throw new BLECharacteristicError('Read failed', deviceId, characteristicId, error);
       }
     }, 'read characteristic');
@@ -182,27 +205,26 @@ class BLEService extends EventEmitter {
 
     return this.withRetry(async () => {
       try {
-        const service = await device.discoverService(serviceId);
-        if (!service) {
+        const service = await device.discoverServices();
+        const targetService = service.find(s => s.uuid === serviceId);
+        if (!targetService) {
           throw new BLECharacteristicError('Service not found', deviceId, characteristicId);
         }
 
-        const characteristic = await service.discoverCharacteristic(characteristicId);
-        if (!characteristic) {
+        const characteristics = await targetService.discoverCharacteristics();
+        const targetCharacteristic = characteristics.find(c => c.uuid === characteristicId);
+        if (!targetCharacteristic) {
           throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
         }
 
-        await characteristic.write(data);
+        await targetCharacteristic.write(data);
       } catch (error) {
-        if (error instanceof BLECharacteristicError) {
-          throw error;
-        }
         throw new BLECharacteristicError('Write failed', deviceId, characteristicId, error);
       }
     }, 'write characteristic');
   }
 
-  async subscribeToCharacteristic(deviceId, serviceId, characteristicId) {
+  async subscribeToCharacteristic(deviceId, serviceId, characteristicId, callback) {
     const device = this.connectedDevices.get(deviceId);
     if (!device) {
       throw new BLEConnectionError('Device not connected', deviceId);
@@ -210,21 +232,23 @@ class BLEService extends EventEmitter {
 
     return this.withRetry(async () => {
       try {
-        const service = await device.discoverService(serviceId);
-        if (!service) {
+        const service = await device.discoverServices();
+        const targetService = service.find(s => s.uuid === serviceId);
+        if (!targetService) {
           throw new BLECharacteristicError('Service not found', deviceId, characteristicId);
         }
 
-        const characteristic = await service.discoverCharacteristic(characteristicId);
-        if (!characteristic) {
+        const characteristics = await targetService.discoverCharacteristics();
+        const targetCharacteristic = characteristics.find(c => c.uuid === characteristicId);
+        if (!targetCharacteristic) {
           throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
         }
 
-        await characteristic.subscribe();
-      } catch (error) {
-        if (error instanceof BLECharacteristicError) {
-          throw error;
+        await targetCharacteristic.subscribe();
+        if (callback) {
+          targetCharacteristic.on('data', callback);
         }
+      } catch (error) {
         throw new BLECharacteristicError('Subscribe failed', deviceId, characteristicId, error);
       }
     }, 'subscribe to characteristic');
@@ -238,21 +262,21 @@ class BLEService extends EventEmitter {
 
     return this.withRetry(async () => {
       try {
-        const service = await device.discoverService(serviceId);
-        if (!service) {
+        const service = await device.discoverServices();
+        const targetService = service.find(s => s.uuid === serviceId);
+        if (!targetService) {
           throw new BLECharacteristicError('Service not found', deviceId, characteristicId);
         }
 
-        const characteristic = await service.discoverCharacteristic(characteristicId);
-        if (!characteristic) {
+        const characteristics = await targetService.discoverCharacteristics();
+        const targetCharacteristic = characteristics.find(c => c.uuid === characteristicId);
+        if (!targetCharacteristic) {
           throw new BLECharacteristicError('Characteristic not found', deviceId, characteristicId);
         }
 
-        await characteristic.unsubscribe();
+        await targetCharacteristic.unsubscribe();
+        targetCharacteristic.removeAllListeners('data');
       } catch (error) {
-        if (error instanceof BLECharacteristicError) {
-          throw error;
-        }
         throw new BLECharacteristicError('Unsubscribe failed', deviceId, characteristicId, error);
       }
     }, 'unsubscribe from characteristic');
@@ -268,17 +292,17 @@ class BLEService extends EventEmitter {
 
   async disconnectDevice(deviceId) {
     const device = this.connectedDevices.get(deviceId);
-    if (!device) {
-      return; // Device not connected, nothing to do
-    }
-
-    try {
-      await device.disconnect();
-    } catch (error) {
-      logger.warn(`Error during device disconnect: ${error.message}`);
-    } finally {
+    if (device) {
+      // Remove from connected devices first to prevent reconnection attempts
       this.connectedDevices.delete(deviceId);
-      logger.info('Disconnected from device:', deviceId);
+      
+      // Remove disconnect listener
+      device.removeAllListeners('disconnect');
+      
+      // Disconnect the device
+      await device.disconnect();
+      
+      logger.info('Device disconnected:', deviceId);
     }
   }
 }
