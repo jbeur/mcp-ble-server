@@ -1,5 +1,6 @@
 const logger = require('../../utils/logger');
 const metrics = require('../../utils/metrics');
+const zlib = require('zlib');
 
 class InvalidationStrategy {
     constructor(config) {
@@ -100,6 +101,13 @@ class CachingLayer {
                 maxConcurrent: 5,
                 priority: 'medium',
                 ...config.preloading
+            },
+            compression: {
+                enabled: false,
+                minSize: 1024, // Minimum size in bytes to compress
+                level: 6, // Compression level (1-9)
+                algorithm: 'gzip', // 'gzip' or 'deflate'
+                ...config.compression
             }
         };
 
@@ -118,10 +126,20 @@ class CachingLayer {
         this.lastHitRatio = 0;
         this.lastHitRatioUpdate = Date.now();
 
+        // Initialize compression metrics
+        this.compressionStats = {
+            compressedBytes: 0,
+            uncompressedBytes: 0,
+            compressionRatio: 0,
+            compressionTime: 0,
+            decompressionTime: 0
+        };
+
         this.invalidationStrategy = new InvalidationStrategy(config.invalidationStrategy);
 
-        // Validate TTL configuration
+        // Validate configurations
         this.validateTTLConfig(config.ttl);
+        this.validateCompressionConfig(this.config.compression);
 
         // Initialize memory monitoring state
         this.stopMemoryMonitoring();
@@ -192,6 +210,28 @@ class CachingLayer {
 
             if (config.warningThresholdMB >= config.maxMemoryMB) {
                 throw new Error('Warning threshold must be less than max memory');
+            }
+        }
+    }
+
+    validateCompressionConfig(config) {
+        if (!config) return;
+
+        if (typeof config !== 'object') {
+            throw new Error('Invalid compression configuration');
+        }
+
+        if (config.enabled) {
+            if (typeof config.minSize !== 'number' || config.minSize < 0) {
+                throw new Error('Invalid minSize configuration');
+            }
+
+            if (typeof config.level !== 'number' || config.level < 1 || config.level > 9) {
+                throw new Error('Invalid compression level configuration');
+            }
+
+            if (!['gzip', 'deflate'].includes(config.algorithm)) {
+                throw new Error('Invalid compression algorithm configuration');
             }
         }
     }
@@ -367,29 +407,136 @@ class CachingLayer {
         this._isCacheOperation = false;
     }
 
-    async set(key, value, priority = 'medium') {
+    async compress(value) {
+        if (!this.config.compression.enabled) return value;
+
         try {
-            if (!this.invalidationStrategy.priorityLevels.includes(priority)) {
-                throw new Error(`Invalid priority level: ${priority}`);
+            // Handle circular references
+            const seen = new WeakSet();
+            const stringified = JSON.stringify(value, (key, val) => {
+                if (typeof val === 'object' && val !== null) {
+                    if (seen.has(val)) {
+                        return '[Circular]';
+                    }
+                    seen.add(val);
+                }
+                return val;
+            });
+
+            const buffer = Buffer.from(stringified);
+            if (buffer.length < this.config.compression.minSize) {
+                this.compressionStats.uncompressedBytes += buffer.length;
+                return value;
             }
 
+            const startTime = process.hrtime();
+            let compressed;
+
+            try {
+                if (this.config.compression.algorithm === 'gzip') {
+                    compressed = await new Promise((resolve, reject) => {
+                        zlib.gzip(buffer, { level: this.config.compression.level }, (err, result) => {
+                            if (err) reject(err);
+                            else resolve(result);
+                        });
+                    });
+                } else {
+                    compressed = await new Promise((resolve, reject) => {
+                        zlib.deflate(buffer, { level: this.config.compression.level }, (err, result) => {
+                            if (err) reject(err);
+                            else resolve(result);
+                        });
+                    });
+                }
+
+                const endTime = process.hrtime(startTime);
+                const compressionTime = endTime[0] * 1000 + endTime[1] / 1000000;
+                
+                this.compressionStats.compressionTime += compressionTime;
+                this.compressionStats.compressedBytes += compressed.length;
+                this.compressionStats.uncompressedBytes += buffer.length;
+                this.compressionStats.compressionRatio = 
+                    this.compressionStats.compressedBytes / this.compressionStats.uncompressedBytes;
+
+                metrics.gauge('cache_compression_ratio', this.compressionStats.compressionRatio);
+                metrics.gauge('cache_compression_time_ms', this.compressionStats.compressionTime);
+
+                return {
+                    compressed: true,
+                    data: compressed,
+                    algorithm: this.config.compression.algorithm
+                };
+            } catch (error) {
+                logger.error('Compression failed', { error });
+                return value;
+            }
+        } catch (error) {
+            logger.error('Error preparing value for compression', { error });
+            return value;
+        }
+    }
+
+    async decompress(value) {
+        if (!value || !value.compressed) return value;
+
+        const startTime = process.hrtime();
+        try {
+            const buffer = await new Promise((resolve, reject) => {
+                if (value.algorithm === 'gzip') {
+                    zlib.gunzip(value.data, (err, result) => {
+                        if (err) reject(err);
+                        else resolve(result);
+                    });
+                } else {
+                    zlib.inflate(value.data, (err, result) => {
+                        if (err) reject(err);
+                        else resolve(result);
+                    });
+                }
+            });
+
+            const endTime = process.hrtime(startTime);
+            this.compressionStats.decompressionTime += endTime[0] * 1000 + endTime[1] / 1000000;
+            metrics.gauge('cache_decompression_time_ms', this.compressionStats.decompressionTime);
+
+            return JSON.parse(buffer.toString());
+        } catch (error) {
+            logger.error('Decompression failed', { error });
+            return null;
+        }
+    }
+
+    async set(key, value, priority = 'medium') {
+        try {
+            if (!key) {
+                throw new Error('Key is required');
+            }
+
+            // Check memory usage before setting
+            if (this.config.memoryMonitoring?.enabled) {
+                await this.checkMemoryUsage();
+            }
+
+            // Compress value if enabled
+            const compressedValue = await this.compress(value);
+
             const entry = {
-                value,
+                value: compressedValue,
                 timestamp: Date.now(),
                 priority
             };
+
             this.cache.set(key, entry);
+            metrics.incrementCounter('cache_entries_total');
+            logger.debug('Cache entry set', { key, priority });
 
             // Check if we need to invalidate entries
             await this.invalidationStrategy.checkAndInvalidate(this.cache);
 
             // Monitor memory usage after adding entry
             if (this.config.memoryMonitoring?.enabled) {
-                this._isCacheOperation = true;
-                await this.monitorMemoryUsage();
+                await this.checkMemoryUsage();
             }
-
-            return entry;
         } catch (error) {
             logger.error('Error setting cache entry', { error, key });
             throw error;
@@ -398,22 +545,25 @@ class CachingLayer {
 
     async get(key) {
         try {
+            if (!key) {
+                throw new Error('Key is required');
+            }
+
             const entry = this.cache.get(key);
             if (!entry) {
-                this.recordCacheMiss();
+                this.recordMiss();
                 return null;
             }
 
-            // Check TTL expiration
+            // Check TTL if enabled
             if (this.config.ttl?.enabled) {
                 const ttl = this.getTTLForPriority(entry.priority);
-                const age = Date.now() - entry.timestamp;
-                if (age > ttl) {
+                if (Date.now() - entry.timestamp > ttl) {
                     this.cache.delete(key);
-                    this.recordCacheMiss();
+                    this.recordMiss();
                     metrics.incrementCounter('cache_invalidations_total', {
-                        key,
-                        reason: 'ttl'
+                        reason: 'ttl',
+                        key
                     });
                     logger.info('Cache entry invalidated', {
                         key,
@@ -423,23 +573,25 @@ class CachingLayer {
                 }
             }
 
-            // Record cache hit
-            this.recordCacheHit();
+            this.recordHit();
+            
+            // Decompress value if compressed
+            const value = await this.decompress(entry.value);
 
             // Monitor memory usage after retrieving entry
             if (this.config.memoryMonitoring?.enabled) {
-                this._isCacheOperation = true;
-                await this.monitorMemoryUsage();
+                await this.checkMemoryUsage();
             }
 
-            return entry.value;
+            return value;
         } catch (error) {
             logger.error('Error getting cache entry', { error, key });
-            throw error;
+            this.recordMiss();
+            return null;
         }
     }
 
-    recordCacheHit() {
+    recordHit() {
         if (!this.config.hitRatioTracking?.enabled) return;
 
         this.hitCount++;
@@ -447,7 +599,7 @@ class CachingLayer {
         this.updateHitRatio();
     }
 
-    recordCacheMiss() {
+    recordMiss() {
         if (!this.config.hitRatioTracking?.enabled) return;
 
         this.missCount++;
@@ -555,26 +707,25 @@ class CachingLayer {
     }
 
     async processPreloadQueue() {
-        if (this._preloadInProgress || this._preloadQueue.length === 0) {
-            return;
-        }
+        if (this._preloadInProgress || !this.config.preloading.enabled) return;
 
         this._preloadInProgress = true;
+        const batchSize = this.config.preloading.batchSize;
+        const maxConcurrent = this.config.preloading.maxConcurrent;
 
         try {
             while (this._preloadQueue.length > 0) {
-                const batch = this._preloadQueue.splice(0, this.config.preloading.batchSize);
-                const promises = batch.map(entry => 
-                    this.set(entry.key, entry.value, entry.priority || this.config.preloading.priority)
-                );
+                const batch = this._preloadQueue.splice(0, batchSize);
+                const promises = batch.map(async (entry) => {
+                    try {
+                        await this.set(entry.key, entry.value, entry.priority || this.config.preloading.priority);
+                    } catch (error) {
+                        logger.error('Error preloading cache entry', { error, key: entry.key });
+                        return entry;
+                    }
+                });
 
-                // Process batch with concurrency limit
-                await Promise.all(promises.slice(0, this.config.preloading.maxConcurrent));
-
-                // Monitor memory usage after each batch
-                if (this.config.memoryMonitoring?.enabled) {
-                    await this.monitorMemoryUsage();
-                }
+                await Promise.all(promises.slice(0, maxConcurrent));
             }
         } catch (error) {
             logger.error('Error processing preload queue', { error });
@@ -616,6 +767,73 @@ class CachingLayer {
                 priority: this.config.preloading?.priority
             }
         };
+    }
+
+    getCompressionStats() {
+        return {
+            ...this.compressionStats,
+            enabled: this.config.compression.enabled,
+            algorithm: this.config.compression.algorithm,
+            minSize: this.config.compression.minSize,
+            level: this.config.compression.level
+        };
+    }
+
+    async checkMemoryUsage() {
+        try {
+            const memoryUsage = process.memoryUsage();
+            const currentUsageMB = memoryUsage.heapUsed / (1024 * 1024);
+            this.lastRecordedMemoryUsage = currentUsageMB;
+
+            metrics.recordMemoryUsage('cache_memory_usage', currentUsageMB);
+
+            if (currentUsageMB > this.config.memoryMonitoring.warningThresholdMB) {
+                logger.warn('Cache memory usage exceeds warning threshold', {
+                    currentUsageMB,
+                    warningThresholdMB: this.config.memoryMonitoring.warningThresholdMB
+                });
+            }
+
+            if (currentUsageMB > this.config.memoryMonitoring.maxMemoryMB) {
+                // Get entries sorted by priority (lowest first) and timestamp (oldest first)
+                const entries = Array.from(this.cache.entries())
+                    .map(([key, entry]) => ({
+                        key,
+                        entry,
+                        priorityValue: this.invalidationStrategy.getPriorityValue(entry.priority)
+                    }))
+                    .sort((a, b) => {
+                        if (a.priorityValue !== b.priorityValue) {
+                            return a.priorityValue - b.priorityValue;
+                        }
+                        return a.entry.timestamp - b.entry.timestamp;
+                    });
+
+                // Find the highest priority value
+                const highestPriorityValue = Math.max(...entries.map(e => e.priorityValue));
+
+                // Remove entries starting with lowest priority until memory usage is below limit
+                // But preserve entries with the highest priority
+                for (const {key, priorityValue} of entries) {
+                    if (priorityValue < highestPriorityValue) {
+                        this.cache.delete(key);
+                        metrics.recordGauge('cache_memory_evictions', 1);
+                        logger.info('Cache entry evicted due to memory limit', { key, priorityValue });
+
+                        // Check if memory usage is now below limit
+                        const newMemoryUsage = process.memoryUsage().heapUsed / (1024 * 1024);
+                        if (newMemoryUsage <= this.config.memoryMonitoring.maxMemoryMB) {
+                            return currentUsageMB;
+                        }
+                    }
+                }
+            }
+
+            return currentUsageMB;
+        } catch (error) {
+            logger.error('Error getting memory stats', error);
+            throw new Error('Memory usage error');
+        }
     }
 }
 

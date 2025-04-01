@@ -1,16 +1,15 @@
 module.exports = {
     testEnvironment: 'node',
+    moduleFileExtensions: ['js', 'json'],
+    transform: {},
     testMatch: ['**/tests/**/*.test.js'],
-    collectCoverage: true,
-    coverageDirectory: 'coverage',
-    coverageReporters: ['text', 'lcov'],
+    moduleDirectories: ['node_modules'],
     verbose: true,
+    collectCoverage: true,
+    coverageReporters: ['text', 'lcov'],
+    coverageDirectory: 'coverage',
     testTimeout: 10000,
-    setupFilesAfterEnv: ['<rootDir>/tests/setup.js'],
-    moduleNameMapper: {
-        '^@/(.*)$': '<rootDir>/src/$1'
-    },
-    transform: {
-        '^.+\\.js$': 'babel-jest'
-    }
+    transformIgnorePatterns: [
+        'node_modules/(?!(chai)/)'
+    ]
 }; 
