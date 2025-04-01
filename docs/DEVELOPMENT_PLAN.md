@@ -319,12 +319,20 @@ mcp-ble-server/
         - [x] Metrics tracking
         - [x] Error handling
         - [x] Test coverage
-  - [ ] Caching layer
-    - [ ] Cache invalidation strategy
-    - [ ] TTL configuration
-    - [ ] Memory usage monitoring
+  - [x] Caching layer
+    - [x] Cache invalidation strategy
+    - [x] TTL configuration
+    - [x] Memory usage monitoring
+      - [x] Memory stats tracking
+      - [x] Warning threshold monitoring
+      - [x] Memory limit enforcement
+      - [x] Priority-based eviction
+      - [x] Memory metrics collection
     - [ ] Cache hit ratio tracking
-    - [ ] Priority-based caching
+    - [x] Priority-based caching
+      - [x] Priority levels configuration
+      - [x] Priority-based TTLs
+      - [x] Priority-based eviction
     - [ ] Cache preloading
     - [ ] Cache compression
   - [ ] Protocol message validation optimization
@@ -769,7 +777,14 @@ mcp-ble-server/
      - [x] Priority management
      - [x] Load balancing
      - [x] Performance metrics
-   - [ ] Implement caching layer
+   - [-] Implement caching layer
+     - [x] Cache invalidation strategy
+     - [x] TTL configuration
+     - [x] Memory usage monitoring
+     - [ ] Cache hit ratio tracking
+     - [x] Priority-based caching
+     - [ ] Cache preloading
+     - [ ] Cache compression
    - [ ] Optimize device discovery
    - [ ] Add load balancing
    - [ ] Optimize base64 operations
