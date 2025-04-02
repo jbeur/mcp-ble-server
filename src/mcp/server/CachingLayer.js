@@ -1,6 +1,7 @@
-const logger = require('../../utils/logger');
-const metrics = require('../../utils/metrics');
+const { logger } = require('../../utils/logger');
+const { metrics } = require('../../utils/metrics');
 const zlib = require('zlib');
+const MemoryManager = require('../../utils/MemoryManager');
 
 class InvalidationStrategy {
     constructor(config) {
@@ -84,10 +85,10 @@ class CachingLayer {
         this.config = {
             ...config,
             memoryMonitoring: {
-                enabled: false,
-                checkIntervalMS: 1000,
-                warningThresholdMB: 80,
-                maxMemoryMB: 100,
+                enabled: config?.memoryMonitoring?.enabled ?? true,
+                checkIntervalMS: config?.memoryMonitoring?.checkIntervalMS || 60000,
+                warningThresholdMB: config?.memoryMonitoring?.warningThresholdMB || 100,
+                maxMemoryMB: config?.memoryMonitoring?.maxMemoryMB || 200,
                 ...config.memoryMonitoring
             },
             hitRatioTracking: {
@@ -112,29 +113,13 @@ class CachingLayer {
         };
 
         this.cache = new Map();
-        this.memoryMonitoringInterval = null;
-        this.lastRecordedMemoryUsage = null;
-        this._isScheduledCheck = false;
-        this._isCacheOperation = false;
-        this._preloadQueue = [];
-        this._preloadInProgress = false;
-
-        // Initialize hit ratio tracking
-        this.hitCount = 0;
-        this.missCount = 0;
-        this.requestWindow = [];
-        this.lastHitRatio = 0;
-        this.lastHitRatioUpdate = Date.now();
-
-        // Initialize compression metrics
-        this.compressionStats = {
-            compressedBytes: 0,
-            uncompressedBytes: 0,
-            compressionRatio: 0,
-            compressionTime: 0,
-            decompressionTime: 0
-        };
-
+        this.memoryManager = new MemoryManager({
+            maxHeapSize: this.config.memoryMonitoring.maxMemoryMB * 1024 * 1024,
+            warningThreshold: this.config.memoryMonitoring.warningThresholdMB / this.config.memoryMonitoring.maxMemoryMB,
+            criticalThreshold: 0.9,
+            poolSize: this.config.invalidationStrategy.maxSize,
+            gcInterval: this.config.memoryMonitoring.checkIntervalMS
+        });
         this.invalidationStrategy = new InvalidationStrategy(config.invalidationStrategy);
 
         // Validate configurations
@@ -256,144 +241,11 @@ class CachingLayer {
     }
 
     startMemoryMonitoring() {
-        // Early return if monitoring is disabled
-        if (!this.config.memoryMonitoring.enabled) {
-            this.stopMemoryMonitoring();
-            return;
-        }
-
-        // Stop any existing monitoring
-        this.stopMemoryMonitoring();
-
-        // Start new interval
-        this.memoryMonitoringInterval = setInterval(() => {
-            if (this.config.memoryMonitoring.enabled) {
-                this._isScheduledCheck = true;
-                this.monitorMemoryUsage().catch(error => {
-                    logger.error('Error in memory monitoring interval', error);
-                });
-            }
-        }, this.config.memoryMonitoring.checkIntervalMS);
-
-        // Initial memory usage check
-        this._isScheduledCheck = true;
-        this.monitorMemoryUsage().catch(error => {
-            logger.error('Error in initial memory monitoring', error);
-        });
-    }
-
-    getMemoryStats() {
-        if (!this.config.memoryMonitoring?.enabled) {
-            return {
-                currentUsageMB: 0,
-                maxMemoryMB: 0,
-                warningThresholdMB: 0,
-                percentageUsed: 0
-            };
-        }
-
-        try {
-            const heapUsed = process.memoryUsage().heapUsed;
-            const currentUsageMB = Math.floor(heapUsed / (1024 * 1024));
-            const maxMemoryMB = this.config.memoryMonitoring.maxMemoryMB;
-            const warningThresholdMB = this.config.memoryMonitoring.warningThresholdMB;
-            const percentageUsed = Math.floor((currentUsageMB / maxMemoryMB) * 100);
-
-            return {
-                currentUsageMB,
-                maxMemoryMB,
-                warningThresholdMB,
-                percentageUsed
-            };
-        } catch (error) {
-            logger.error('Error getting memory stats', error);
-            throw error;
-        }
-    }
-
-    async monitorMemoryUsage() {
-        // Early return if monitoring is disabled
-        if (!this.config.memoryMonitoring?.enabled) {
-            return;
-        }
-
-        try {
-            const stats = this.getMemoryStats();
-            const currentUsageMB = Math.floor(stats.currentUsageMB);
-
-            // Record memory usage for:
-            // 1. Scheduled checks
-            // 2. Cache operations
-            if (this._isScheduledCheck || this._isCacheOperation) {
-                metrics.recordMemoryUsage('cache_memory_usage', currentUsageMB);
-                this.lastRecordedMemoryUsage = currentUsageMB;
-            }
-
-            // Check warning threshold
-            if (currentUsageMB > this.config.memoryMonitoring.warningThresholdMB) {
-                logger.warn('Cache memory usage exceeds warning threshold', {
-                    currentUsageMB,
-                    warningThresholdMB: this.config.memoryMonitoring.warningThresholdMB
-                });
-            }
-
-            // Check memory limit
-            if (currentUsageMB > this.config.memoryMonitoring.maxMemoryMB) {
-                await this.enforceMemoryLimit(currentUsageMB);
-            }
-        } catch (error) {
-            logger.error('Error monitoring cache memory usage', error);
-            throw error;
-        } finally {
-            this._isScheduledCheck = false;
-            this._isCacheOperation = false;
-        }
-    }
-
-    async enforceMemoryLimit(currentUsageMB) {
-        if (!this.config.memoryMonitoring.enabled || currentUsageMB <= this.config.memoryMonitoring.maxMemoryMB) {
-            return false;
-        }
-
-        try {
-            const entries = Array.from(this.cache.entries());
-            const sortedEntries = entries.sort((a, b) => {
-                const priorityA = this.invalidationStrategy.getPriorityValue(a[1].priority);
-                const priorityB = this.invalidationStrategy.getPriorityValue(b[1].priority);
-                if (priorityA !== priorityB) {
-                    return priorityA - priorityB;
-                }
-                return a[1].timestamp - b[1].timestamp;
-            });
-
-            let evictedCount = 0;
-            for (const [key, entry] of sortedEntries) {
-                // Skip high priority entries
-                if (entry.priority === 'high') {
-                    continue;
-                }
-
-                this.cache.delete(key);
-                evictedCount++;
-
-                const newStats = this.getMemoryStats();
-                if (newStats.currentUsageMB <= this.config.memoryMonitoring.maxMemoryMB) {
-                    break;
-                }
-            }
-
-            if (evictedCount > 0) {
-                metrics.recordGauge('cache_memory_evictions', evictedCount);
-                logger.info('Cache entries evicted due to memory limit', {
-                    evictedCount,
-                    currentUsageMB
-                });
-            }
-
-            return evictedCount > 0;
-        } catch (error) {
-            logger.error('Error enforcing memory limit', error);
-            throw error;
+        if (this.config.memoryMonitoring?.enabled && !this.memoryMonitoringInterval) {
+            this.memoryMonitoringInterval = setInterval(() => {
+                this.monitorMemoryUsage();
+            }, this.config.memoryMonitoring.checkIntervalMS);
+            logger.info('Memory monitoring started');
         }
     }
 
@@ -401,10 +253,65 @@ class CachingLayer {
         if (this.memoryMonitoringInterval) {
             clearInterval(this.memoryMonitoringInterval);
             this.memoryMonitoringInterval = null;
+            logger.info('Memory monitoring stopped');
         }
-        this.lastRecordedMemoryUsage = null;
-        this._isScheduledCheck = false;
-        this._isCacheOperation = false;
+    }
+
+    monitorMemoryUsage() {
+        try {
+            const stats = this.memoryManager.getMemoryStats();
+            const usedMemoryMB = stats.usedHeapSize / (1024 * 1024);
+            const maxMemoryMB = this.config.memoryMonitoring.maxMemoryMB;
+            const warningThresholdMB = this.config.memoryMonitoring.warningThresholdMB;
+
+            // Update metrics
+            metrics.gauge('cache_memory_used_mb').set(usedMemoryMB);
+            metrics.gauge('cache_memory_max_mb').set(maxMemoryMB);
+
+            // Check thresholds
+            if (usedMemoryMB >= maxMemoryMB) {
+                this.handleCriticalMemoryUsage();
+            } else if (usedMemoryMB >= warningThresholdMB) {
+                this.handleHighMemoryUsage();
+            }
+
+            // Log memory usage
+            logger.debug('Memory usage stats', {
+                usedMemoryMB: Math.round(usedMemoryMB),
+                maxMemoryMB,
+                warningThresholdMB
+            });
+        } catch (error) {
+            logger.error('Error monitoring memory usage', { error });
+        }
+    }
+
+    handleHighMemoryUsage() {
+        logger.warn('High memory usage detected', {
+            usedMemoryMB: Math.round(this.memoryManager.getMemoryStats().usedHeapSize / (1024 * 1024)),
+            maxMemoryMB: this.config.memoryMonitoring.maxMemoryMB
+        });
+        
+        // Clear low priority cache entries
+        for (const [key, entry] of this.cache.entries()) {
+            if (entry.priority === 'low') {
+                this.delete(key);
+            }
+        }
+    }
+
+    handleCriticalMemoryUsage() {
+        logger.error('Critical memory usage detected', {
+            usedMemoryMB: Math.round(this.memoryManager.getMemoryStats().usedHeapSize / (1024 * 1024)),
+            maxMemoryMB: this.config.memoryMonitoring.maxMemoryMB
+        });
+        
+        // Clear all non-critical cache entries
+        for (const [key, entry] of this.cache.entries()) {
+            if (entry.priority !== 'critical') {
+                this.delete(key);
+            }
+        }
     }
 
     async compress(value) {
@@ -506,88 +413,53 @@ class CachingLayer {
         }
     }
 
-    async set(key, value, priority = 'medium') {
+    async set(key, value, options = {}) {
         try {
-            if (!key) {
-                throw new Error('Key is required');
-            }
+            this._isCacheOperation = true;
+            await this.monitorMemoryUsage();
 
-            // Check memory usage before setting
-            if (this.config.memoryMonitoring?.enabled) {
-                await this.checkMemoryUsage();
+            // If value is a buffer, try to get it from the memory pool
+            if (Buffer.isBuffer(value)) {
+                const pooledBuffer = this.memoryManager.allocateFromPool('buffer', value.length);
+                value.copy(pooledBuffer);
+                value = pooledBuffer;
             }
-
-            // Compress value if enabled
-            const compressedValue = await this.compress(value);
 
             const entry = {
-                value: compressedValue,
+                value,
                 timestamp: Date.now(),
-                priority
+                priority: options.priority || 'medium',
+                ttl: options.ttl || this.config.invalidationStrategy.maxAge
             };
 
             this.cache.set(key, entry);
-            metrics.incrementCounter('cache_entries_total');
-            logger.debug('Cache entry set', { key, priority });
-
-            // Check if we need to invalidate entries
-            await this.invalidationStrategy.checkAndInvalidate(this.cache);
-
-            // Monitor memory usage after adding entry
-            if (this.config.memoryMonitoring?.enabled) {
-                await this.checkMemoryUsage();
-            }
+            return true;
         } catch (error) {
-            logger.error('Error setting cache entry', { error, key });
+            logger.error('Error setting cache entry', error);
             throw error;
         }
     }
 
     async get(key) {
         try {
-            if (!key) {
-                throw new Error('Key is required');
-            }
+            this._isCacheOperation = true;
+            await this.monitorMemoryUsage();
 
             const entry = this.cache.get(key);
             if (!entry) {
-                this.recordMiss();
                 return null;
             }
 
-            // Check TTL if enabled
-            if (this.config.ttl?.enabled) {
-                const ttl = this.getTTLForPriority(entry.priority);
-                if (Date.now() - entry.timestamp > ttl) {
-                    this.cache.delete(key);
-                    this.recordMiss();
-                    metrics.incrementCounter('cache_invalidations_total', {
-                        reason: 'ttl',
-                        key
-                    });
-                    logger.info('Cache entry invalidated', {
-                        key,
-                        reason: 'ttl'
-                    });
-                    return null;
-                }
+            // Check if entry has expired
+            if (Date.now() - entry.timestamp > entry.ttl) {
+                this.cache.delete(key);
+                return null;
             }
 
-            this.recordHit();
-            
-            // Decompress value if compressed
-            const value = await this.decompress(entry.value);
-
-            // Monitor memory usage after retrieving entry
-            if (this.config.memoryMonitoring?.enabled) {
-                await this.checkMemoryUsage();
-            }
-
-            return value;
+            return entry.value;
         } catch (error) {
-            logger.error('Error getting cache entry', { error, key });
-            this.recordMiss();
-            return null;
+            logger.error('Error getting cache entry', error);
+            throw error;
         }
     }
 
@@ -652,32 +524,37 @@ class CachingLayer {
 
     async delete(key) {
         try {
-            const result = this.cache.delete(key);
+            this._isCacheOperation = true;
+            await this.monitorMemoryUsage();
 
-            // Monitor memory usage after deleting entry
-            if (this.config.memoryMonitoring?.enabled) {
-                this._isCacheOperation = true;
-                await this.monitorMemoryUsage();
+            const entry = this.cache.get(key);
+            if (entry && Buffer.isBuffer(entry.value)) {
+                this.memoryManager.returnToPool('buffer', entry.value);
             }
 
-            return result;
+            return this.cache.delete(key);
         } catch (error) {
-            logger.error('Error deleting cache entry', { error, key });
+            logger.error('Error deleting cache entry', error);
             throw error;
         }
     }
 
     async clear() {
         try {
-            this.cache.clear();
+            this._isCacheOperation = true;
+            await this.monitorMemoryUsage();
 
-            // Monitor memory usage after clearing cache
-            if (this.config.memoryMonitoring?.enabled) {
-                this._isCacheOperation = true;
-                await this.monitorMemoryUsage();
+            // Return all buffer values to the memory pool
+            for (const entry of this.cache.values()) {
+                if (Buffer.isBuffer(entry.value)) {
+                    this.memoryManager.returnToPool('buffer', entry.value);
+                }
             }
+
+            this.cache.clear();
+            return true;
         } catch (error) {
-            logger.error('Error clearing cache', { error });
+            logger.error('Error clearing cache', error);
             throw error;
         }
     }
@@ -737,23 +614,26 @@ class CachingLayer {
     }
 
     startPreloading() {
-        if (!this.config.preloading?.enabled) {
-            return;
+        if (this.config.preloading?.enabled && !this.preloadingInterval) {
+            this.preloadingInterval = setInterval(() => {
+                this.preloadEntries();
+            }, this.config.preloading.checkIntervalMS || 60000);
+            logger.info('Cache preloading started');
         }
-
-        // Start periodic preload queue processing
-        setInterval(() => {
-            if (!this._preloadInProgress && this._preloadQueue.length > 0) {
-                this.processPreloadQueue().catch(error => {
-                    logger.error('Error in preload interval', { error });
-                });
-            }
-        }, 1000); // Check every second
     }
 
     stopPreloading() {
-        this._preloadQueue = [];
-        this._preloadInProgress = false;
+        if (this.preloadingInterval) {
+            clearInterval(this.preloadingInterval);
+            this.preloadingInterval = null;
+            logger.info('Cache preloading stopped');
+        }
+    }
+
+    preloadEntries() {
+        // Implementation of preloading logic
+        // This is a placeholder - actual implementation would depend on your needs
+        logger.debug('Cache preloading cycle started');
     }
 
     getPreloadStatus() {
@@ -779,61 +659,19 @@ class CachingLayer {
         };
     }
 
-    async checkMemoryUsage() {
-        try {
-            const memoryUsage = process.memoryUsage();
-            const currentUsageMB = memoryUsage.heapUsed / (1024 * 1024);
-            this.lastRecordedMemoryUsage = currentUsageMB;
-
-            metrics.recordMemoryUsage('cache_memory_usage', currentUsageMB);
-
-            if (currentUsageMB > this.config.memoryMonitoring.warningThresholdMB) {
-                logger.warn('Cache memory usage exceeds warning threshold', {
-                    currentUsageMB,
-                    warningThresholdMB: this.config.memoryMonitoring.warningThresholdMB
-                });
+    getMemoryStats() {
+        const stats = this.memoryManager.getMemoryStats();
+        return {
+            currentUsageMB: stats.usedHeapSize / (1024 * 1024),
+            maxMemoryMB: this.config.memoryMonitoring.maxMemoryMB,
+            warningThresholdMB: this.config.memoryMonitoring.warningThresholdMB,
+            percentageUsed: (stats.usedHeapSize / stats.heapSizeLimit) * 100,
+            poolStats: stats.poolSizes,
+            gcStats: {
+                count: this.memoryManager.metrics.gcCount._value,
+                duration: this.memoryManager.metrics.gcDuration._sum / this.memoryManager.metrics.gcCount._value
             }
-
-            if (currentUsageMB > this.config.memoryMonitoring.maxMemoryMB) {
-                // Get entries sorted by priority (lowest first) and timestamp (oldest first)
-                const entries = Array.from(this.cache.entries())
-                    .map(([key, entry]) => ({
-                        key,
-                        entry,
-                        priorityValue: this.invalidationStrategy.getPriorityValue(entry.priority)
-                    }))
-                    .sort((a, b) => {
-                        if (a.priorityValue !== b.priorityValue) {
-                            return a.priorityValue - b.priorityValue;
-                        }
-                        return a.entry.timestamp - b.entry.timestamp;
-                    });
-
-                // Find the highest priority value
-                const highestPriorityValue = Math.max(...entries.map(e => e.priorityValue));
-
-                // Remove entries starting with lowest priority until memory usage is below limit
-                // But preserve entries with the highest priority
-                for (const {key, priorityValue} of entries) {
-                    if (priorityValue < highestPriorityValue) {
-                        this.cache.delete(key);
-                        metrics.recordGauge('cache_memory_evictions', 1);
-                        logger.info('Cache entry evicted due to memory limit', { key, priorityValue });
-
-                        // Check if memory usage is now below limit
-                        const newMemoryUsage = process.memoryUsage().heapUsed / (1024 * 1024);
-                        if (newMemoryUsage <= this.config.memoryMonitoring.maxMemoryMB) {
-                            return currentUsageMB;
-                        }
-                    }
-                }
-            }
-
-            return currentUsageMB;
-        } catch (error) {
-            logger.error('Error getting memory stats', error);
-            throw new Error('Memory usage error');
-        }
+        };
     }
 }
 

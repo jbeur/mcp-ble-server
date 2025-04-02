@@ -1,59 +1,95 @@
 const CachingLayer = require('../../../../src/mcp/server/CachingLayer');
-const logger = require('../../../../src/utils/logger');
-const metrics = require('../../../../src/utils/metrics');
+const MemoryManager = require('../../../../src/utils/MemoryManager');
 
 // Mock dependencies
-jest.mock('../../../../src/utils/logger');
-jest.mock('../../../../src/utils/metrics', () => ({
+const metrics = {
+    gauge: jest.fn().mockReturnValue({
+        set: jest.fn()
+    }),
+    counter: jest.fn().mockReturnValue({
+        inc: jest.fn()
+    }),
+    histogram: jest.fn().mockReturnValue({
+        observe: jest.fn()
+    }),
     incrementCounter: jest.fn(),
     recordMemoryUsage: jest.fn(),
-    recordGauge: jest.fn(),
-    gauge: jest.fn()
-}));
+    recordGauge: jest.fn()
+};
+
+jest.mock('../../../../src/utils/metrics', () => metrics);
+
+const logger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn()
+};
+
+jest.mock('../../../../src/utils/logger', () => logger);
 
 describe('CachingLayer', () => {
     let cachingLayer;
-    const baseConfig = {
-        maxSize: 1000,
-        ttl: 3600000, // 1 hour
-        checkPeriod: 60000, // 1 minute
-        invalidationStrategy: {
-            maxAge: 3600000,
-            maxSize: 1000,
-            priorityLevels: ['high', 'medium', 'low']
-        },
-        memoryMonitoring: {
-            enabled: true,
-            maxMemoryMB: 100,
-            warningThresholdMB: 80,
-            checkIntervalMS: 1000
-        },
-        hitRatioTracking: {
-            enabled: true,
-            windowSize: 1000
-        },
-        preloading: {
-            enabled: false,
-            batchSize: 10,
-            maxConcurrent: 5,
-            priority: 'medium'
-        },
-        compression: {
-            enabled: false,
-            minSize: 1024,
-            level: 6,
-            algorithm: 'gzip'
-        }
-    };
+    let mockMemoryManager;
 
     beforeEach(() => {
-        jest.clearAllMocks();
         jest.useFakeTimers();
+        jest.clearAllMocks();
+
+        mockMemoryManager = {
+            getMemoryStats: jest.fn().mockReturnValue({
+                heapSize: 1000,
+                heapUsed: 500,
+                heapLimit: 2000,
+                poolSize: 100
+            }),
+            allocateFromPool: jest.fn().mockReturnValue(Buffer.alloc(100)),
+            returnToPool: jest.fn(),
+            startMonitoring: jest.fn(),
+            stopMonitoring: jest.fn()
+        };
+
+        // Create a mock class for MemoryManager
+        class MockMemoryManager {
+            constructor() {
+                Object.assign(this, mockMemoryManager);
+            }
+        }
+
+        jest.mock('../../../../src/utils/MemoryManager', () => MockMemoryManager);
+
+        const baseConfig = {
+            memoryMonitoring: {
+                enabled: true,
+                interval: 1000,
+                highWatermark: 0.8,
+                criticalWatermark: 0.9
+            },
+            invalidationStrategy: {
+                type: 'ttl',
+                maxAge: 3600000
+            },
+            compression: {
+                enabled: true,
+                threshold: 1024,
+                algorithm: 'gzip',
+                level: 6
+            }
+        };
+
         cachingLayer = new CachingLayer(baseConfig);
     });
 
     afterEach(() => {
-        jest.useRealTimers();
+        if (cachingLayer) {
+            if (cachingLayer.stopMemoryMonitoring) {
+                cachingLayer.stopMemoryMonitoring();
+            }
+            if (cachingLayer.stopPreloading) {
+                cachingLayer.stopPreloading();
+            }
+        }
+        jest.clearAllTimers();
     });
 
     describe('constructor', () => {
@@ -969,6 +1005,293 @@ describe('CachingLayer', () => {
 
             const retrieved = await disabledCache.get('key1');
             expect(retrieved).toBe(largeValue);
+        });
+    });
+
+    describe('memory management', () => {
+        it('should initialize with memory monitoring enabled', () => {
+            expect(cachingLayer.memoryMonitorInterval).toBeDefined();
+            expect(cachingLayer.memoryManager).toBeDefined();
+        });
+
+        it('should monitor memory usage and update metrics', () => {
+            cachingLayer.monitorMemoryUsage();
+            expect(metrics.recordMemoryUsage).toHaveBeenCalledWith(50 * 1024 * 1024);
+            expect(metrics.recordGauge).toHaveBeenCalledWith('cache_memory_usage_ratio', 0.25);
+        });
+
+        it('should handle high memory usage', () => {
+            mockMemoryManager.getMemoryStats.mockReturnValueOnce({
+                usedHeapSize: 90 * 1024 * 1024, // 90MB
+                heapSizeLimit: 100 * 1024 * 1024, // 100MB
+                poolSizes: { buffer: 10 }
+            });
+
+            cachingLayer.monitorMemoryUsage();
+            expect(logger.warn).toHaveBeenCalledWith(
+                'High memory usage detected',
+                expect.objectContaining({
+                    usedHeapSize: 90 * 1024 * 1024,
+                    heapSizeLimit: 100 * 1024 * 1024,
+                    usageRatio: 0.9
+                })
+            );
+        });
+
+        it('should handle critical memory usage', () => {
+            mockMemoryManager.getMemoryStats.mockReturnValueOnce({
+                usedHeapSize: 95 * 1024 * 1024, // 95MB
+                heapSizeLimit: 100 * 1024 * 1024, // 100MB
+                poolSizes: { buffer: 10 }
+            });
+
+            cachingLayer.monitorMemoryUsage();
+            expect(logger.error).toHaveBeenCalledWith(
+                'Critical memory usage detected',
+                expect.objectContaining({
+                    usedHeapSize: 95 * 1024 * 1024,
+                    heapSizeLimit: 100 * 1024 * 1024,
+                    usageRatio: 0.95
+                })
+            );
+        });
+
+        it('should use memory pool for buffer operations', async () => {
+            const buffer = Buffer.from('test');
+            await cachingLayer.set('test-key', buffer);
+            expect(mockMemoryManager.allocateFromPool).toHaveBeenCalledWith('buffer', expect.any(Number));
+        });
+
+        it('should return buffers to pool on deletion', async () => {
+            const buffer = Buffer.from('test');
+            await cachingLayer.set('test-key', buffer);
+            await cachingLayer.delete('test-key');
+            expect(mockMemoryManager.returnToPool).toHaveBeenCalledWith('buffer', buffer);
+        });
+
+        it('should return all buffers to pool on clear', async () => {
+            const buffer1 = Buffer.from('test1');
+            const buffer2 = Buffer.from('test2');
+            await cachingLayer.set('key1', buffer1);
+            await cachingLayer.set('key2', buffer2);
+            await cachingLayer.clear();
+            expect(mockMemoryManager.returnToPool).toHaveBeenCalledTimes(2);
+        });
+
+        it('should provide detailed memory statistics', () => {
+            const stats = cachingLayer.getMemoryStats();
+            expect(stats).toEqual({
+                usedHeapSize: 50 * 1024 * 1024,
+                heapSizeLimit: 200 * 1024 * 1024,
+                poolSizes: { buffer: 10 },
+                poolHits: 5,
+                poolMisses: 2,
+                gcCount: 3,
+                gcDuration: 150
+            });
+        });
+    });
+});
+
+describe('CachingLayer Memory Management', () => {
+    let cachingLayer;
+    let mockMemoryManager;
+
+    beforeEach(() => {
+        // Reset mocks
+        jest.clearAllMocks();
+
+        // Mock MemoryManager
+        mockMemoryManager = {
+            getMemoryStats: jest.fn(),
+            allocateFromPool: jest.fn(),
+            returnToPool: jest.fn(),
+            metrics: {
+                poolHits: { _value: 0 },
+                poolMisses: { _value: 0 },
+                gcCount: { _value: 0 },
+                gcDuration: { _sum: 0 }
+            }
+        };
+        MemoryManager.mockImplementation(() => mockMemoryManager);
+
+        // Mock metrics
+        metrics.gauge = jest.fn().mockReturnValue({ set: jest.fn() });
+        metrics.counter = jest.fn().mockReturnValue({ inc: jest.fn() });
+        metrics.histogram = jest.fn().mockReturnValue({ observe: jest.fn() });
+        metrics.recordMemoryUsage = jest.fn();
+        metrics.recordGauge = jest.fn();
+
+        // Create CachingLayer instance with memory monitoring enabled
+        cachingLayer = new CachingLayer({
+            memoryMonitoring: {
+                enabled: true,
+                checkIntervalMS: 1000,
+                warningThresholdMB: 100,
+                maxMemoryMB: 200
+            },
+            invalidationStrategy: {
+                maxAge: 3600000,
+                maxSize: 1000,
+                priorityLevels: ['low', 'medium', 'high'],
+                getPriorityValue: (priority) => {
+                    const values = { low: 0, medium: 1, high: 2 };
+                    return values[priority] || 0;
+                }
+            }
+        });
+    });
+
+    afterEach(() => {
+        cachingLayer.stopMemoryMonitoring();
+        jest.clearAllTimers();
+    });
+
+    describe('Memory Monitoring', () => {
+        it('should start memory monitoring on initialization', () => {
+            expect(cachingLayer.memoryCheckInterval).toBeDefined();
+        });
+
+        it('should stop memory monitoring when requested', () => {
+            cachingLayer.stopMemoryMonitoring();
+            expect(cachingLayer.memoryCheckInterval).toBeNull();
+        });
+
+        it('should monitor memory usage during cache operations', async () => {
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 50 * 1024 * 1024, // 50MB
+                heapSizeLimit: 200 * 1024 * 1024 // 200MB
+            });
+
+            await cachingLayer.monitorMemoryUsage();
+            expect(metrics.recordMemoryUsage).toHaveBeenCalledWith('cache_memory_usage', 50);
+        });
+
+        it('should handle high memory usage warnings', async () => {
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 150 * 1024 * 1024, // 150MB
+                heapSizeLimit: 200 * 1024 * 1024 // 200MB
+            });
+
+            await cachingLayer.monitorMemoryUsage();
+            expect(logger.warn).toHaveBeenCalled();
+        });
+
+        it('should enforce memory limits when exceeded', async () => {
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 250 * 1024 * 1024, // 250MB
+                heapSizeLimit: 200 * 1024 * 1024 // 200MB
+            });
+
+            // Add some test entries to the cache
+            await cachingLayer.set('key1', Buffer.from('test1'), { priority: 'low' });
+            await cachingLayer.set('key2', Buffer.from('test2'), { priority: 'medium' });
+            await cachingLayer.set('key3', Buffer.from('test3'), { priority: 'high' });
+
+            await cachingLayer.monitorMemoryUsage();
+            expect(logger.error).toHaveBeenCalled();
+            expect(metrics.recordGauge).toHaveBeenCalledWith('cache_memory_evictions', expect.any(Number));
+        });
+    });
+
+    describe('Memory Pooling', () => {
+        it('should use memory pool for buffer operations', async () => {
+            const testBuffer = Buffer.from('test');
+            mockMemoryManager.allocateFromPool.mockReturnValue(Buffer.alloc(testBuffer.length));
+
+            await cachingLayer.set('key', testBuffer);
+            expect(mockMemoryManager.allocateFromPool).toHaveBeenCalledWith('buffer', testBuffer.length);
+        });
+
+        it('should return buffers to pool on deletion', async () => {
+            const testBuffer = Buffer.from('test');
+            await cachingLayer.set('key', testBuffer);
+            await cachingLayer.delete('key');
+            expect(mockMemoryManager.returnToPool).toHaveBeenCalledWith('buffer', expect.any(Buffer));
+        });
+
+        it('should return buffers to pool on clear', async () => {
+            const testBuffer = Buffer.from('test');
+            await cachingLayer.set('key', testBuffer);
+            await cachingLayer.clear();
+            expect(mockMemoryManager.returnToPool).toHaveBeenCalledWith('buffer', expect.any(Buffer));
+        });
+    });
+
+    describe('Memory Statistics', () => {
+        it('should provide accurate memory statistics', () => {
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 75 * 1024 * 1024, // 75MB
+                heapSizeLimit: 200 * 1024 * 1024, // 200MB
+                poolSizes: { buffer: 10, string: 5, object: 3 }
+            });
+
+            const stats = cachingLayer.getMemoryStats();
+            expect(stats).toEqual({
+                currentUsageMB: 75,
+                maxMemoryMB: 200,
+                warningThresholdMB: 100,
+                percentageUsed: 37.5,
+                poolStats: { buffer: 10, string: 5, object: 3 },
+                gcStats: {
+                    count: 0,
+                    duration: 0
+                }
+            });
+        });
+
+        it('should track pool hits and misses', async () => {
+            const testBuffer = Buffer.from('test');
+            mockMemoryManager.allocateFromPool.mockReturnValue(Buffer.alloc(testBuffer.length));
+            mockMemoryManager.metrics.poolHits._value = 5;
+            mockMemoryManager.metrics.poolMisses._value = 2;
+
+            await cachingLayer.monitorMemoryUsage();
+            expect(metrics.gauge).toHaveBeenCalledWith('cache_memory_pool_hits', 5);
+            expect(metrics.gauge).toHaveBeenCalledWith('cache_memory_pool_misses', 2);
+        });
+    });
+
+    describe('Memory Limit Enforcement', () => {
+        it('should evict low priority entries first', async () => {
+            // Add entries with different priorities
+            await cachingLayer.set('low1', Buffer.from('low1'), { priority: 'low' });
+            await cachingLayer.set('low2', Buffer.from('low2'), { priority: 'low' });
+            await cachingLayer.set('medium1', Buffer.from('medium1'), { priority: 'medium' });
+            await cachingLayer.set('high1', Buffer.from('high1'), { priority: 'high' });
+
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 250 * 1024 * 1024, // 250MB
+                heapSizeLimit: 200 * 1024 * 1024 // 200MB
+            });
+
+            await cachingLayer.monitorMemoryUsage();
+            expect(cachingLayer.cache.has('high1')).toBe(true);
+            expect(cachingLayer.cache.has('medium1')).toBe(true);
+            expect(cachingLayer.cache.has('low1')).toBe(false);
+            expect(cachingLayer.cache.has('low2')).toBe(false);
+        });
+
+        it('should respect memory limits during preloading', async () => {
+            cachingLayer.config.preloading.enabled = true;
+            const entries = Array(20).fill(null).map((_, i) => ({
+                key: `key${i}`,
+                value: Buffer.from(`value${i}`),
+                priority: i % 3 === 0 ? 'high' : i % 3 === 1 ? 'medium' : 'low'
+            }));
+
+            mockMemoryManager.getMemoryStats.mockReturnValue({
+                usedHeapSize: 250 * 1024 * 1024, // 250MB
+                heapSizeLimit: 200 * 1024 * 1024 // 200MB
+            });
+
+            await cachingLayer.preload(entries);
+            await new Promise(resolve => setTimeout(resolve, 100)); // Wait for preload to process
+
+            // Verify that high priority entries were preserved
+            expect(cachingLayer.cache.has('key0')).toBe(true);
+            expect(cachingLayer.cache.has('key3')).toBe(true);
+            expect(cachingLayer.cache.has('key6')).toBe(true);
         });
     });
 }); 
