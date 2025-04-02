@@ -22,7 +22,7 @@ const MAGIC_NUMBERS = {
 
 const HEADER_MAGIC = Buffer.from([0x4D, 0x43, 0x50]); // "MCP"
 const HEADER_VERSION = 1;
-const HEADER_SIZE = 8; // Magic (3) + Algorithm (1) + Level (1) + Length (2) + Reserved (1)
+const HEADER_SIZE = 8; // Magic (3) + Version (1) + Algorithm (1) + Level (1) + Length (2)
 
 const DEFAULT_CONFIG = {
     defaultAlgorithm: ALGORITHMS.GZIP,
@@ -38,9 +38,12 @@ const DEFAULT_CONFIG = {
 class CompressionUtils {
     constructor(config = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.validateConfig();
         this.algorithmStats = {};
-        this.initializeAlgorithmStats();
+        this.versionStats = {
+            v1: { count: 0, totalTime: 0, totalBytes: 0, avgRatio: 0, errors: 0 },
+            legacy: { count: 0, totalTime: 0, totalBytes: 0, avgRatio: 0, errors: 0 }
+        };
+        this.validateConfig();
     }
 
     validateConfig() {
@@ -99,6 +102,93 @@ class CompressionUtils {
         return this.config.defaultAlgorithm;
     }
 
+    getVersion(data) {
+        if (!Buffer.isBuffer(data)) {
+            data = Buffer.from(data);
+        }
+
+        // Check for custom header
+        if (data.length >= HEADER_SIZE) {
+            const header = data.slice(0, HEADER_SIZE);
+            if (header[0] === HEADER_MAGIC[0] && header[1] === HEADER_MAGIC[1] && header[2] === HEADER_MAGIC[2]) {
+                const version = header[3];
+                if (version === HEADER_VERSION) {
+                    return 1;
+                }
+                return -1; // Invalid version
+            }
+        }
+
+        // Check for legacy format (gzip magic numbers)
+        if (data.length >= MAGIC_NUMBERS[ALGORITHMS.GZIP].length) {
+            const magic = data.slice(0, MAGIC_NUMBERS[ALGORITHMS.GZIP].length);
+            if (magic.equals(MAGIC_NUMBERS[ALGORITHMS.GZIP])) {
+                return 0; // Legacy format
+            }
+        }
+
+        return -1; // Unknown format
+    }
+
+    getSupportedFeatures(data) {
+        const version = this.getVersion(data);
+        if (version === -1) {
+            throw new Error('Unsupported compression format');
+        }
+
+        if (version === 0) {
+            return {
+                version: 0,
+                algorithms: ['gzip'],
+                compressionLevels: false,
+                metrics: false
+            };
+        }
+
+        return {
+            version: 1,
+            algorithms: ['gzip', 'deflate', 'brotli'],
+            compressionLevels: true,
+            metrics: true
+        };
+    }
+
+    getVersionStats() {
+        return this.versionStats;
+    }
+
+    async compressLegacy(data) {
+        if (!data) {
+            throw new Error('Compression error: null or undefined input');
+        }
+
+        const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        if (buffer.length < this.config.compressionThreshold) {
+            logger.debug('Data size below threshold, skipping compression');
+            return buffer;
+        }
+
+        const startTime = process.hrtime.bigint();
+        try {
+            const compressed = await promisify(zlib.gzip)(buffer, { level: this.config.defaultCompressionLevel });
+            const endTime = process.hrtime.bigint();
+            const elapsedTime = Number(endTime - startTime) / 1_000_000;
+
+            this.versionStats.legacy.count++;
+            this.versionStats.legacy.totalTime += elapsedTime;
+            this.versionStats.legacy.totalBytes += buffer.length;
+            const ratio = compressed.length / buffer.length;
+            this.versionStats.legacy.avgRatio = 
+                ((this.versionStats.legacy.avgRatio * (this.versionStats.legacy.count - 1)) + ratio) / 
+                this.versionStats.legacy.count;
+
+            return compressed;
+        } catch (error) {
+            this.versionStats.legacy.errors++;
+            throw error;
+        }
+    }
+
     async compress(data, options = {}) {
         if (!data) {
             throw new Error('Compression error: null or undefined input');
@@ -133,21 +223,34 @@ class CompressionUtils {
             }
 
             const endTime = process.hrtime.bigint();
-            const elapsedTime = Number(endTime - startTime) / 1_000_000; // Convert to milliseconds
+            const elapsedTime = Number(endTime - startTime) / 1_000_000;
 
             // Add custom header
             const header = Buffer.alloc(HEADER_SIZE);
             HEADER_MAGIC.copy(header, 0);
-            header[3] = ALGORITHM_INDICES[algorithm];
-            header[4] = level;
-            header.writeUInt16BE(compressed.length, 5);
-            header[7] = 0; // Reserved
+            header[3] = HEADER_VERSION;
+            header[4] = ALGORITHM_INDICES[algorithm];
+            header[5] = level;
+            header.writeUInt16BE(compressed.length, 6);
 
             const result = Buffer.concat([header, compressed]);
+            
+            // Update version stats
+            this.versionStats.v1.count++;
+            this.versionStats.v1.totalTime += elapsedTime;
+            this.versionStats.v1.totalBytes += buffer.length;
+            const ratio = result.length / buffer.length;
+            this.versionStats.v1.avgRatio = 
+                ((this.versionStats.v1.avgRatio * (this.versionStats.v1.count - 1)) + ratio) / 
+                this.versionStats.v1.count;
+
+            // Update algorithm stats
             this.updateMetrics(algorithm, buffer.length, compressed.length, elapsedTime);
+            
             return result;
         } catch (error) {
-            throw new Error('Compression error: ' + error.message);
+            this.versionStats.v1.errors++;
+            throw error;
         }
     }
 
@@ -164,56 +267,50 @@ class CompressionUtils {
             return data;
         }
 
-        // Check for custom header
-        if (data.length >= HEADER_SIZE) {
-            const header = data.slice(0, HEADER_SIZE);
-            if (header[0] === HEADER_MAGIC[0] && header[1] === HEADER_MAGIC[1] && header[2] === HEADER_MAGIC[2]) {
-                const algorithmIndex = header[3];
-                const level = header[4];
-                const compressedLength = header.readUInt16BE(5);
-
-                if (data.length < HEADER_SIZE + compressedLength) {
-                    throw new Error('Invalid compressed data length');
-                }
-
-                const compressedData = data.slice(HEADER_SIZE, HEADER_SIZE + compressedLength);
-                const algorithm = Object.values(ALGORITHMS)[algorithmIndex];
-
-                if (!algorithm) {
-                    throw new Error('Invalid algorithm index in header');
-                }
-
-                try {
-                    switch (algorithm) {
-                        case ALGORITHMS.GZIP:
-                            return await promisify(zlib.gunzip)(compressedData);
-                        case ALGORITHMS.DEFLATE:
-                            return await promisify(zlib.inflate)(compressedData);
-                        case ALGORITHMS.BROTLI:
-                            return await promisify(zlib.brotliDecompress)(compressedData);
-                        default:
-                            throw new Error('Unsupported algorithm in header');
-                    }
-                } catch (error) {
-                    throw new Error('Decompression error: ' + error.message);
-                }
-            }
+        const version = this.getVersion(data);
+        if (version === -1) {
+            throw new Error('Unsupported compression format');
         }
 
-        // Try legacy formats
-        const algorithm = this.detectAlgorithm(data);
         try {
+            if (version === 0) {
+                // Legacy format (gzip)
+                return await promisify(zlib.gunzip)(data);
+            }
+
+            // Version 1 format
+            const header = data.slice(0, HEADER_SIZE);
+            const algorithmIndex = header[4];
+            const level = header[5];
+            const compressedLength = header.readUInt16BE(6);
+
+            if (data.length < HEADER_SIZE + compressedLength) {
+                throw new Error('Invalid compressed data length');
+            }
+
+            const compressedData = data.slice(HEADER_SIZE, HEADER_SIZE + compressedLength);
+            const algorithm = Object.values(ALGORITHMS)[algorithmIndex];
+
+            if (!algorithm) {
+                throw new Error('Invalid algorithm index in header');
+            }
+
             switch (algorithm) {
                 case ALGORITHMS.GZIP:
-                    return await promisify(zlib.gunzip)(data);
+                    return await promisify(zlib.gunzip)(compressedData);
                 case ALGORITHMS.DEFLATE:
-                    return await promisify(zlib.inflate)(data);
+                    return await promisify(zlib.inflate)(compressedData);
                 case ALGORITHMS.BROTLI:
-                    return await promisify(zlib.brotliDecompress)(data);
+                    return await promisify(zlib.brotliDecompress)(compressedData);
                 default:
-                    throw new Error('Unsupported algorithm');
+                    throw new Error('Unsupported algorithm in header');
             }
         } catch (error) {
+            if (version === 0) {
+                this.versionStats.legacy.errors++;
+            } else {
+                this.versionStats.v1.errors++;
+            }
             throw new Error('Decompression error: ' + error.message);
         }
     }
