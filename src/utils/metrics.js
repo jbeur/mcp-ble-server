@@ -107,15 +107,31 @@ class Metrics {
 const metrics = new Metrics();
 
 const metricsModule = {
-    increment: (metric, value = 1) => {
-        // Stub for now
-    },
-    gauge: (metric, value) => {
-        // Stub for now
-    },
-    observe: (metric, value) => {
-        // Stub for now
-    }
+    requestSigningSuccess: { inc: () => {} },
+    requestSigningError: { inc: () => {} },
+    requestVerificationSuccess: { inc: () => {} },
+    requestVerificationError: { inc: () => {} }
+};
+
+const prometheus = require('prom-client');
+
+const prometheusMetrics = {
+    requestSigningSuccess: new prometheus.Counter({
+        name: 'request_signing_success_total',
+        help: 'Total number of successful request signings'
+    }),
+    requestSigningError: new prometheus.Counter({
+        name: 'request_signing_error_total',
+        help: 'Total number of failed request signings'
+    }),
+    requestVerificationSuccess: new prometheus.Counter({
+        name: 'request_verification_success_total',
+        help: 'Total number of successful request verifications'
+    }),
+    requestVerificationError: new prometheus.Counter({
+        name: 'request_verification_error_total',
+        help: 'Total number of failed request verifications'
+    })
 };
 
 module.exports = metricsModule; 

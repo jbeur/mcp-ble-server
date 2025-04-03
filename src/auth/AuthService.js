@@ -1,226 +1,236 @@
 const jwt = require('jsonwebtoken');
-const { logger } = require('../utils/logger');
-const { metrics } = require('../utils/metrics');
+const logger = require('../utils/logger');
+const metrics = require('../utils/metrics');
 const { ERROR_CODES } = require('../mcp/protocol/messages');
+const SessionEncryption = require('../mcp/security/SessionEncryption');
 
 class AuthService {
     constructor(config, metrics) {
+        this.config = config || {};
+        this.metrics = metrics;
         this.activeSessions = new Map();
         this.rateLimiters = new Map();
-        this.config = config || {
-            auth: {
-                enabled: true,
-                apiKeys: ['valid-api-key'],
-                jwtSecret: 'test-secret',
-                sessionDuration: 3600,
-                rateLimit: {
-                    windowMs: 60000, // 1 minute for testing
-                    maxRequests: 5 // 5 requests per minute for testing
-                }
-            }
-        };
-        this.metrics = metrics || {
-            authError: { inc: () => {} },
-            authSuccess: { inc: () => {} },
-            rateLimitExceeded: { inc: () => {} },
-            authSessionCreationSuccess: { inc: () => {} },
-            authSessionCreationError: { inc: () => {} },
-            authSessionRemovalSuccess: { inc: () => {} },
-            authSessionRemovalError: { inc: () => {} },
-            authCleanupSuccess: { inc: () => {} },
-            authRateLimitExceeded: { inc: () => {} },
-            authRateLimitCheckSuccess: { inc: () => {} }
-        };
-
-        // Start cleanup interval
-        this.cleanupInterval = setInterval(() => this.cleanup(), 1000);
+        this.cleanupInterval = null;
+        this.sessionEncryption = new SessionEncryption(config);
+        this.encryptionKey = this.sessionEncryption.generateKey();
+        this.startCleanup();
     }
 
     async validateApiKey(apiKey) {
         try {
-            if (!this.config.auth.enabled) {
-                this.metrics.authSuccess.inc();
-                return this.createSession(apiKey);
+            if (!this.config.auth?.enabled) {
+                return { valid: true };
             }
 
             if (!apiKey) {
-                const error = new Error('API key is required');
-                error.code = ERROR_CODES.INVALID_API_KEY;
-                this.metrics.authError.inc({ code: ERROR_CODES.INVALID_API_KEY });
-                throw error;
+                throw new Error('API key is required');
             }
 
-            // Check rate limit first
-            if (this.isRateLimited(apiKey)) {
-                const error = new Error('Too many authentication attempts');
-                error.code = ERROR_CODES.RATE_LIMIT_EXCEEDED;
-                this.metrics.rateLimitExceeded.inc({ key: apiKey });
-                throw error;
+            const isValid = this.config.auth.apiKeys?.includes(apiKey);
+            if (!isValid) {
+                throw new Error('Invalid API key');
             }
 
-            const isValid = this.config.auth.apiKeys.includes(apiKey);
-            if (isValid) {
-                this.metrics.authSuccess.inc();
-                return this.createSession(apiKey);
-            }
-
-            this.metrics.authError.inc({ code: ERROR_CODES.INVALID_API_KEY });
-            const error = new Error('Invalid API key');
-            error.code = ERROR_CODES.INVALID_API_KEY;
-            throw error;
+            this.metrics?.authValidationSuccess?.inc();
+            return { valid: true };
         } catch (error) {
             logger.error('API key validation failed:', error.message);
+            this.metrics?.authValidationError?.inc({ code: 'INVALID_API_KEY' });
             throw error;
         }
     }
 
-    createSession(apiKey) {
+    /**
+     * Create a new session for a client
+     * @param {string} clientId - Client identifier
+     * @returns {Object} Session object with token
+     */
+    createSession(clientId) {
         try {
-            if (!apiKey) {
-                const error = new Error('API key is required');
-                error.code = ERROR_CODES.INVALID_API_KEY;
-                this.metrics.authSessionCreationError.inc();
-                throw error;
+            if (!clientId) {
+                throw new Error('Client ID is required');
             }
 
             const token = jwt.sign(
-                { apiKey },
+                { apiKey: clientId },
                 this.config.auth.jwtSecret,
-                { expiresIn: `${this.config.auth.sessionDuration}s` }
+                { expiresIn: this.config.auth.sessionDuration }
             );
 
-            const session = {
-                apiKey,
+            const sessionData = {
                 token,
                 createdAt: Date.now(),
-                expiresAt: Date.now() + (this.config.auth.sessionDuration * 1000),
                 lastActivity: Date.now()
             };
 
-            this.activeSessions.set(apiKey, session);
-            this.metrics.authSessionCreationSuccess.inc();
+            // Encrypt session data before storing
+            const encryptedSession = this.sessionEncryption.encryptSession(sessionData, this.encryptionKey);
+            this.activeSessions.set(clientId, encryptedSession);
 
-            return session;
+            this.metrics?.authSessionCreationSuccess?.inc();
+            return sessionData;
         } catch (error) {
-            logger.error('Error creating session', { error, apiKey });
-            this.metrics.authSessionCreationError.inc();
+            logger.error('Session creation failed:', error.message);
+            this.metrics?.authSessionCreationError?.inc();
             throw error;
         }
     }
 
+    /**
+     * Validate a session token
+     * @param {string} token - Session token to validate
+     * @returns {boolean} True if session is valid
+     */
     validateSession(token) {
         try {
             if (!token) {
                 return false;
             }
 
-            let decoded;
+            const decoded = jwt.verify(token, this.config.auth.jwtSecret);
+            const encryptedSession = this.activeSessions.get(decoded.apiKey);
+
+            if (!encryptedSession) {
+                return false;
+            }
+
             try {
-                decoded = jwt.verify(token, this.config.auth.jwtSecret);
-            } catch (error) {
-                logger.error('JWT verification failed', { error });
-                return false;
-            }
-
-            const session = this.activeSessions.get(decoded.apiKey);
-            if (!session || session.token !== token || session.expiresAt < Date.now()) {
-                if (session) {
-                    this.removeSession(decoded.apiKey);
+                const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                if (session.token !== token) {
+                    return false;
                 }
+
+                // Update last activity and re-encrypt
+                session.lastActivity = Date.now();
+                const updatedEncryptedSession = this.sessionEncryption.encryptSession(session, this.encryptionKey);
+                this.activeSessions.set(decoded.apiKey, updatedEncryptedSession);
+
+                return true;
+            } catch (decryptError) {
+                logger.error('Session decryption failed:', decryptError.message);
                 return false;
             }
-
-            // Update last activity
-            session.lastActivity = Date.now();
-            this.activeSessions.set(decoded.apiKey, session);
-            return true;
         } catch (error) {
-            logger.error('Error validating session', { error });
+            logger.error('Error validating session', { error: error.message });
             return false;
         }
     }
 
-    removeSession(apiKey) {
+    removeSession(clientId) {
         try {
-            if (this.activeSessions.has(apiKey)) {
-                this.activeSessions.delete(apiKey);
-                this.metrics.authSessionRemovalSuccess.inc();
+            if (this.activeSessions.delete(clientId)) {
+                this.metrics?.authSessionRemovalSuccess?.inc();
             }
         } catch (error) {
-            logger.error('Error removing session', { error, apiKey });
-            this.metrics.authSessionRemovalError.inc();
+            logger.error('Error removing session:', error.message);
+            this.metrics?.authSessionRemovalError?.inc();
         }
     }
 
+    /**
+     * Start the session cleanup interval
+     */
+    startCleanup() {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+        }
+
+        this.cleanupInterval = setInterval(() => {
+            try {
+                const now = Date.now();
+                for (const [clientId, encryptedSession] of this.activeSessions.entries()) {
+                    try {
+                        const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                        const age = now - session.lastActivity;
+                        if (age > this.config.auth.sessionTimeout) {
+                            this.removeSession(clientId);
+                            this.metrics?.authSessionCleanupSuccess?.inc();
+                        }
+                    } catch (decryptError) {
+                        logger.error('Failed to decrypt session during cleanup:', decryptError.message);
+                        this.removeSession(clientId);
+                        this.metrics?.authSessionCleanupError?.inc();
+                    }
+                }
+            } catch (error) {
+                logger.error('Session cleanup error:', error.message);
+                this.metrics?.authSessionCleanupError?.inc();
+            }
+        }, this.config.auth.cleanupInterval || 300000); // Default to 5 minutes
+    }
+
+    /**
+     * Stop the session cleanup interval
+     */
+    stopCleanup() {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+        }
+    }
+
+    /**
+     * Clean up expired sessions
+     */
     cleanup() {
         try {
             const now = Date.now();
-            
-            // Cleanup expired sessions
-            for (const [apiKey, session] of this.activeSessions.entries()) {
-                if (session && now > session.expiresAt) {
-                    this.removeSession(apiKey);
+            for (const [clientId, encryptedSession] of this.activeSessions.entries()) {
+                try {
+                    const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                    const age = now - session.lastActivity;
+                    if (age > this.config.auth.sessionTimeout) {
+                        this.removeSession(clientId);
+                        this.metrics?.authSessionCleanupSuccess?.inc();
+                    }
+                } catch (decryptError) {
+                    logger.error('Failed to decrypt session during cleanup:', decryptError.message);
+                    this.removeSession(clientId);
+                    this.metrics?.authSessionCleanupError?.inc();
                 }
             }
-
-            // Cleanup expired rate limits
-            for (const [key, limit] of this.rateLimiters.entries()) {
-                if (limit && now - limit.timestamp > this.config.auth.rateLimit.windowMs) {
-                    this.rateLimiters.delete(key);
-                }
-            }
-
-            this.metrics.authCleanupSuccess.inc();
         } catch (error) {
-            logger.error('Error cleaning up expired sessions', { 
-                error: error.message || 'Unknown error',
-                timestamp: new Date().toISOString()
-            });
-            this.metrics.authError.inc({ code: ERROR_CODES.PROCESSING_ERROR });
+            logger.error('Session cleanup error:', error.message);
+            this.metrics?.authSessionCleanupError?.inc();
         }
     }
 
     isRateLimited(key) {
         try {
+            if (!this.config.auth?.rateLimit?.enabled) {
+                return false;
+            }
+
             const now = Date.now();
-            const rateLimiter = this.rateLimiters.get(key) || { count: 0, timestamp: now };
+            let limiter = this.rateLimiters.get(key);
 
-            // Reset rate limit if time window has passed
-            if (now - rateLimiter.timestamp >= this.config.auth.rateLimit.windowMs) {
-                rateLimiter.count = 0;
-                rateLimiter.timestamp = now;
+            if (!limiter) {
+                limiter = {
+                    count: 0,
+                    lastReset: now
+                };
+                this.rateLimiters.set(key, limiter);
             }
 
-            // Increment request count
-            rateLimiter.count++;
-            this.rateLimiters.set(key, rateLimiter);
-
-            // Check if rate limit is exceeded
-            if (rateLimiter.count > this.config.auth.rateLimit.maxRequests) {
-                this.metrics.authRateLimitExceeded.inc();
-                logger.warn('Rate limit exceeded', {
-                    key,
-                    count: rateLimiter.count,
-                    maxRequests: this.config.auth.rateLimit.maxRequests,
-                    windowMs: this.config.auth.rateLimit.windowMs,
-                    timestamp: new Date().toISOString()
-                });
-
-                return true;
+            // Reset counter if window has expired
+            if (now - limiter.lastReset > this.config.auth.rateLimit.windowMs) {
+                limiter.count = 0;
+                limiter.lastReset = now;
             }
 
-            this.metrics.authRateLimitCheckSuccess.inc();
-            return false;
+            limiter.count++;
+            const isLimited = limiter.count > this.config.auth.rateLimit.maxRequests;
+
+            if (isLimited) {
+                this.metrics?.authRateLimitExceeded?.inc();
+            } else {
+                this.metrics?.authRateLimitCheckSuccess?.inc();
+            }
+
+            return isLimited;
         } catch (error) {
-            logger.error('Error checking rate limit', { error: error.message || error, key });
+            logger.error('Error checking rate limit', { error: error.message, key });
             return false; // Fail open on error
-        }
-    }
-
-    stop() {
-        if (this.cleanupInterval) {
-            clearInterval(this.cleanupInterval);
-            this.cleanupInterval = null;
         }
     }
 }
