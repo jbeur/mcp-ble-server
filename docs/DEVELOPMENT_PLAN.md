@@ -632,16 +632,44 @@ mcp-ble-server/
     - [x] Required headers validation
     - [x] Error handling and logging
     - [x] Metrics tracking
-  - [ ] Session encryption
-  - [ ] API key rotation
+  - [x] Session encryption
+    - [x] AES-256-GCM encryption implementation
+    - [x] Secure key generation
+    - [x] IV and auth tag management
+    - [x] Encrypted session storage
+    - [x] Session cleanup
+    - [x] Metrics tracking
+  - [x] API key rotation
+    - [x] Automatic key rotation
+    - [x] Configurable rotation intervals
+    - [x] Grace period handling
+    - [x] Maximum key age enforcement
+    - [x] Key cleanup
+    - [x] Metrics tracking
   - [x] Request signing
     - [x] HMAC-based signing
     - [x] Timestamp-based validation
     - [x] Required headers enforcement
     - [x] Error handling
     - [x] Metrics collection
-  - [ ] Token-based authentication
-  - [ ] OAuth2 integration
+  - [x] Token-based authentication
+    - [x] JWT token generation
+    - [x] Token validation
+    - [x] Token refresh mechanism
+    - [x] Token expiration handling
+    - [x] Token cleanup
+    - [x] Metrics tracking
+  - [x] OAuth2 integration
+    - [x] Authorization code flow
+    - [x] Access token management
+    - [x] Refresh token management
+    - [x] Token validation
+    - [x] Session management
+    - [x] Error handling
+    - [x] Metrics tracking
+    - [x] Token cleanup
+    - [x] Integration with AuthService
+    - [x] Comprehensive test coverage
   - [x] Priority-based rate limiting
   - [x] Security metrics tracking
     - [x] Authentication success/failure metrics

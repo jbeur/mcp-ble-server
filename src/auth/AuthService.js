@@ -3,6 +3,9 @@ const logger = require('../utils/logger');
 const metrics = require('../utils/metrics');
 const { ERROR_CODES } = require('../mcp/protocol/messages');
 const SessionEncryption = require('../mcp/security/SessionEncryption');
+const ApiKeyManager = require('./ApiKeyManager');
+const TokenAuthentication = require('./TokenAuthentication');
+const OAuth2Service = require('./OAuth2Service');
 
 class AuthService {
     constructor(config, metrics) {
@@ -13,21 +16,28 @@ class AuthService {
         this.cleanupInterval = null;
         this.sessionEncryption = new SessionEncryption(config);
         this.encryptionKey = this.sessionEncryption.generateKey();
+        this.apiKeyManager = new ApiKeyManager(config);
+        this.tokenAuth = new TokenAuthentication(config, metrics);
+        this.oauth2Service = new OAuth2Service(config, metrics);
         this.startCleanup();
+        this.apiKeyManager.startRotationInterval();
     }
 
+    /**
+     * Validate an API key
+     * @param {string} apiKey - API key to validate
+     * @returns {Promise<Object>} Validation result
+     */
     async validateApiKey(apiKey) {
         try {
-            if (!this.config.auth?.enabled) {
-                return { valid: true };
-            }
-
             if (!apiKey) {
+                this.metrics?.authValidationError?.inc();
                 throw new Error('API key is required');
             }
 
-            const isValid = this.config.auth.apiKeys?.includes(apiKey);
+            const isValid = this.apiKeyManager.validateKey(apiKey);
             if (!isValid) {
+                this.metrics?.authValidationError?.inc();
                 throw new Error('Invalid API key');
             }
 
@@ -35,7 +45,6 @@ class AuthService {
             return { valid: true };
         } catch (error) {
             logger.error('API key validation failed:', error.message);
-            this.metrics?.authValidationError?.inc({ code: 'INVALID_API_KEY' });
             throw error;
         }
     }
@@ -51,14 +60,18 @@ class AuthService {
                 throw new Error('Client ID is required');
             }
 
+            // Create or get API key for the client
+            const apiKey = this.apiKeyManager.createKey(clientId);
+
             const token = jwt.sign(
-                { apiKey: clientId },
+                { apiKey, clientId },
                 this.config.auth.jwtSecret,
                 { expiresIn: this.config.auth.sessionDuration }
             );
 
             const sessionData = {
                 token,
+                apiKey,
                 createdAt: Date.now(),
                 lastActivity: Date.now()
             };
@@ -88,7 +101,7 @@ class AuthService {
             }
 
             const decoded = jwt.verify(token, this.config.auth.jwtSecret);
-            const encryptedSession = this.activeSessions.get(decoded.apiKey);
+            const encryptedSession = this.activeSessions.get(decoded.clientId);
 
             if (!encryptedSession) {
                 return false;
@@ -96,6 +109,12 @@ class AuthService {
 
             try {
                 const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                
+                // Validate API key
+                if (!this.apiKeyManager.validateKey(decoded.clientId, session.apiKey)) {
+                    return false;
+                }
+
                 if (session.token !== token) {
                     return false;
                 }
@@ -103,7 +122,7 @@ class AuthService {
                 // Update last activity and re-encrypt
                 session.lastActivity = Date.now();
                 const updatedEncryptedSession = this.sessionEncryption.encryptSession(session, this.encryptionKey);
-                this.activeSessions.set(decoded.apiKey, updatedEncryptedSession);
+                this.activeSessions.set(decoded.clientId, updatedEncryptedSession);
 
                 return true;
             } catch (decryptError) {
@@ -119,6 +138,7 @@ class AuthService {
     removeSession(clientId) {
         try {
             if (this.activeSessions.delete(clientId)) {
+                this.apiKeyManager.removeKey(clientId);
                 this.metrics?.authSessionRemovalSuccess?.inc();
             }
         } catch (error) {
@@ -131,67 +151,50 @@ class AuthService {
      * Start the session cleanup interval
      */
     startCleanup() {
+        // Clear any existing interval
         if (this.cleanupInterval) {
             clearInterval(this.cleanupInterval);
         }
 
+        // Start new cleanup interval
         this.cleanupInterval = setInterval(() => {
             try {
-                const now = Date.now();
-                for (const [clientId, encryptedSession] of this.activeSessions.entries()) {
-                    try {
-                        const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
-                        const age = now - session.lastActivity;
-                        if (age > this.config.auth.sessionTimeout) {
-                            this.removeSession(clientId);
-                            this.metrics?.authSessionCleanupSuccess?.inc();
-                        }
-                    } catch (decryptError) {
-                        logger.error('Failed to decrypt session during cleanup:', decryptError.message);
-                        this.removeSession(clientId);
-                        this.metrics?.authSessionCleanupError?.inc();
-                    }
-                }
+                this.cleanupSessions();
+                this.metrics?.authSessionCleanupSuccess?.inc();
             } catch (error) {
-                logger.error('Session cleanup error:', error.message);
+                logger.error('Session cleanup failed:', error);
                 this.metrics?.authSessionCleanupError?.inc();
             }
-        }, this.config.auth.cleanupInterval || 300000); // Default to 5 minutes
+        }, this.config.security?.auth?.cleanupInterval || 300000); // Default to 5 minutes
     }
 
     /**
-     * Stop the session cleanup interval
+     * Stop the cleanup interval
      */
     stopCleanup() {
         if (this.cleanupInterval) {
             clearInterval(this.cleanupInterval);
             this.cleanupInterval = null;
         }
+        this.apiKeyManager.stopRotationInterval();
     }
 
     /**
      * Clean up expired sessions
      */
-    cleanup() {
-        try {
-            const now = Date.now();
-            for (const [clientId, encryptedSession] of this.activeSessions.entries()) {
-                try {
-                    const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
-                    const age = now - session.lastActivity;
-                    if (age > this.config.auth.sessionTimeout) {
-                        this.removeSession(clientId);
-                        this.metrics?.authSessionCleanupSuccess?.inc();
-                    }
-                } catch (decryptError) {
-                    logger.error('Failed to decrypt session during cleanup:', decryptError.message);
+    cleanupSessions() {
+        const now = Date.now();
+        for (const [clientId, encryptedSession] of this.activeSessions.entries()) {
+            try {
+                const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                const age = now - session.lastActivity;
+                if (age > (this.config.security?.auth?.sessionTimeout || 3600000)) { // Default to 1 hour
                     this.removeSession(clientId);
-                    this.metrics?.authSessionCleanupError?.inc();
                 }
+            } catch (decryptError) {
+                logger.error('Failed to decrypt session during cleanup:', decryptError);
+                this.removeSession(clientId);
             }
-        } catch (error) {
-            logger.error('Session cleanup error:', error.message);
-            this.metrics?.authSessionCleanupError?.inc();
         }
     }
 
@@ -232,6 +235,245 @@ class AuthService {
             logger.error('Error checking rate limit', { error: error.message, key });
             return false; // Fail open on error
         }
+    }
+
+    /**
+     * Create a new token-based session
+     * @param {Object} userData - User data including userId, roles, and clientId
+     * @returns {Object} Session object with access and refresh tokens
+     */
+    async createTokenSession(userData) {
+        try {
+            if (!userData || !userData.userId || !userData.clientId) {
+                throw new Error('Invalid user data');
+            }
+
+            // Generate tokens
+            const tokens = this.tokenAuth.generateTokens(userData);
+
+            // Create session data
+            const sessionData = {
+                ...tokens,
+                userId: userData.userId,
+                clientId: userData.clientId,
+                roles: userData.roles || [],
+                createdAt: Date.now(),
+                lastActivity: Date.now()
+            };
+
+            // Encrypt and store session
+            const encryptedSession = this.sessionEncryption.encryptSession(sessionData, this.encryptionKey);
+            this.activeSessions.set(userData.clientId, encryptedSession);
+
+            this.metrics?.authSessionCreationSuccess?.inc();
+            return {
+                ...tokens,
+                expiresIn: this.config.security?.tokenAuth?.accessTokenExpiry || 15 * 60
+            };
+        } catch (error) {
+            logger.error('Token session creation failed:', error);
+            this.metrics?.authSessionCreationError?.inc();
+            throw error;
+        }
+    }
+
+    /**
+     * Validate a token-based session
+     * @param {string} token - Access token to validate
+     * @returns {boolean} True if session is valid
+     */
+    async validateTokenSession(token) {
+        try {
+            if (!token) {
+                return false;
+            }
+
+            // Verify token
+            const decoded = this.tokenAuth.verifyToken(token, 'access');
+            const encryptedSession = this.activeSessions.get(decoded.clientId);
+
+            if (!encryptedSession) {
+                return false;
+            }
+
+            try {
+                const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                
+                if (session.accessToken !== token) {
+                    return false;
+                }
+
+                // Update last activity and re-encrypt
+                session.lastActivity = Date.now();
+                const updatedEncryptedSession = this.sessionEncryption.encryptSession(session, this.encryptionKey);
+                this.activeSessions.set(decoded.clientId, updatedEncryptedSession);
+
+                return true;
+            } catch (decryptError) {
+                logger.error('Session decryption failed:', decryptError);
+                return false;
+            }
+        } catch (error) {
+            logger.error('Token validation failed:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Refresh a token-based session
+     * @param {string} refreshToken - Refresh token to use
+     * @returns {Object} New access and refresh tokens
+     */
+    async refreshTokenSession(refreshToken) {
+        try {
+            if (!refreshToken) {
+                throw new Error('Refresh token is required');
+            }
+
+            // Verify refresh token
+            const decoded = this.tokenAuth.verifyToken(refreshToken, 'refresh');
+            const encryptedSession = this.activeSessions.get(decoded.clientId);
+
+            if (!encryptedSession) {
+                throw new Error('Session not found');
+            }
+
+            // Get current session data
+            const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+            
+            if (session.refreshToken !== refreshToken) {
+                throw new Error('Invalid refresh token');
+            }
+
+            // Generate new tokens
+            const newTokens = this.tokenAuth.refreshTokens(refreshToken);
+
+            // Update session with new tokens
+            const updatedSession = {
+                ...session,
+                ...newTokens,
+                lastActivity: Date.now()
+            };
+
+            // Encrypt and store updated session
+            const updatedEncryptedSession = this.sessionEncryption.encryptSession(updatedSession, this.encryptionKey);
+            this.activeSessions.set(decoded.clientId, updatedEncryptedSession);
+
+            return {
+                ...newTokens,
+                expiresIn: this.config.security?.tokenAuth?.accessTokenExpiry || 15 * 60
+            };
+        } catch (error) {
+            logger.error('Token refresh failed:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Generate OAuth2 authorization URL
+     * @param {string} state - State parameter for CSRF protection
+     * @param {string} nonce - Nonce for OpenID Connect
+     * @returns {string} Authorization URL
+     */
+    generateOAuth2AuthorizationUrl(state, nonce) {
+        try {
+            return this.oauth2Service.generateAuthorizationUrl(state, nonce);
+        } catch (error) {
+            logger.error('Failed to generate OAuth2 authorization URL:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Create OAuth2 session from authorization code
+     * @param {string} code - Authorization code
+     * @param {string} clientId - Client ID
+     * @param {string} clientSecret - Client secret
+     * @returns {Promise<Object>} Session object with tokens
+     */
+    async createOAuth2Session(code, clientId, clientSecret) {
+        try {
+            const tokens = await this.oauth2Service.exchangeCodeForToken(code, clientId, clientSecret);
+            
+            // Create session data
+            const sessionData = {
+                ...tokens,
+                clientId,
+                createdAt: Date.now(),
+                lastActivity: Date.now(),
+                authType: 'oauth2'
+            };
+
+            // Encrypt and store session
+            const encryptedSession = this.sessionEncryption.encryptSession(sessionData, this.encryptionKey);
+            this.activeSessions.set(clientId, encryptedSession);
+
+            this.metrics?.authSessionCreationSuccess?.inc();
+            return tokens;
+        } catch (error) {
+            logger.error('OAuth2 session creation failed:', error);
+            this.metrics?.authSessionCreationError?.inc();
+            throw error;
+        }
+    }
+
+    /**
+     * Validate OAuth2 access token
+     * @param {string} token - Access token to validate
+     * @returns {Promise<boolean>} True if token is valid
+     */
+    async validateOAuth2Token(token) {
+        try {
+            await this.oauth2Service.validateAccessToken(token);
+            return true;
+        } catch (error) {
+            logger.error('OAuth2 token validation failed:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Refresh OAuth2 access token
+     * @param {string} refreshToken - Refresh token
+     * @returns {Promise<Object>} New access and refresh tokens
+     */
+    async refreshOAuth2Token(refreshToken) {
+        try {
+            const tokens = await this.oauth2Service.refreshAccessToken(refreshToken);
+            
+            // Update session with new tokens
+            const clientId = tokens.client_id; // Assuming client_id is included in token payload
+            const encryptedSession = this.activeSessions.get(clientId);
+            
+            if (encryptedSession) {
+                const session = this.sessionEncryption.decryptSession(encryptedSession, this.encryptionKey);
+                const updatedSession = {
+                    ...session,
+                    ...tokens,
+                    lastActivity: Date.now()
+                };
+                
+                const updatedEncryptedSession = this.sessionEncryption.encryptSession(updatedSession, this.encryptionKey);
+                this.activeSessions.set(clientId, updatedEncryptedSession);
+            }
+
+            return tokens;
+        } catch (error) {
+            logger.error('OAuth2 token refresh failed:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Stop the auth service and clean up resources
+     */
+    stop() {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+        }
+        this.apiKeyManager.stopRotationInterval();
+        this.activeSessions.clear();
     }
 }
 
