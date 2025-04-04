@@ -4,286 +4,159 @@ const logger = require('../utils/logger');
 const metrics = require('../utils/metrics');
 
 class OAuth2Service {
-    constructor(config, metrics) {
-        if (!config) {
-            throw new Error('Configuration is required');
-        }
-
+    constructor(config = {}) {
         this.config = config;
+        this.logger = logger;
         this.metrics = metrics;
-        this.authCodes = new Map(); // Store authorization codes temporarily
-        this.accessTokens = new Map(); // Store access tokens
-        this.refreshTokens = new Map(); // Store refresh tokens
-
-        // Validate configuration
-        const oauthConfig = this.config.security?.oauth2;
-        if (!oauthConfig?.clientId || !oauthConfig?.clientSecret) {
-            throw new Error('Missing required OAuth2 configuration');
-        }
-
-        this.clientId = oauthConfig.clientId;
-        this.clientSecret = oauthConfig.clientSecret;
-        this.redirectUri = oauthConfig.redirectUri;
-        this.tokenEndpoint = oauthConfig.tokenEndpoint;
-        this.authorizationEndpoint = oauthConfig.authorizationEndpoint;
-        this.scopes = oauthConfig.scopes || ['openid', 'profile', 'email'];
-        this.accessTokenExpiry = oauthConfig.accessTokenExpiry || 3600; // 1 hour in seconds
-        this.refreshTokenExpiry = oauthConfig.refreshTokenExpiry || 86400 * 30; // 30 days in seconds
+        this.authorizationCodes = new Map();
+        this.activeSessions = new Map();
+        this.csrfTokens = new Map();
+        this.usedAuthCodes = new Set();
     }
 
-    /**
-     * Generate an authorization URL for OAuth2 flow
-     * @param {string} state - State parameter for CSRF protection
-     * @param {string} nonce - Nonce for OpenID Connect
-     * @returns {string} Authorization URL
-     */
-    generateAuthorizationUrl(state, nonce) {
+    generateAuthorizationUrl(clientId, state) {
         try {
-            const params = new URLSearchParams({
-                response_type: 'code',
-                client_id: this.clientId,
-                redirect_uri: this.redirectUri,
-                scope: this.scopes.join(' '),
-                state,
-                nonce
-            });
-
-            const url = `${this.authorizationEndpoint}?${params.toString()}`;
-            this.metrics?.oauth2AuthorizationUrlGenerated?.inc();
-            return url;
-        } catch (error) {
-            logger.error('Failed to generate authorization URL:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
-        }
-    }
-
-    /**
-     * Generate an authorization code
-     * @param {string} userId - User ID
-     * @param {string} clientId - Client ID
-     * @returns {string} Authorization code
-     */
-    generateAuthorizationCode(userId, clientId) {
-        try {
-            const code = crypto.randomBytes(32).toString('hex');
-            const expiresAt = Date.now() + 600000; // 10 minutes
-
-            this.authCodes.set(code, {
-                userId,
-                clientId,
-                expiresAt
-            });
-
-            this.metrics?.oauth2AuthorizationCodeGenerated?.inc();
-            return code;
-        } catch (error) {
-            logger.error('Failed to generate authorization code:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
-        }
-    }
-
-    /**
-     * Exchange authorization code for access token
-     * @param {string} code - Authorization code
-     * @param {string} clientId - Client ID
-     * @param {string} clientSecret - Client secret
-     * @returns {Promise<Object>} Access token and refresh token
-     */
-    async exchangeCodeForToken(code, clientId, clientSecret) {
-        try {
-            if (clientId !== this.clientId || clientSecret !== this.clientSecret) {
-                throw new Error('Invalid client credentials');
+            if (!clientId) {
+                throw new Error('Client ID is required');
             }
 
-            const authCode = this.authCodes.get(code);
-            if (!authCode) {
+            // Generate CSRF token
+            const csrfToken = crypto.randomBytes(32).toString('hex');
+            this.csrfTokens.set(csrfToken, {
+                clientId,
+                createdAt: Date.now(),
+                expiresAt: Date.now() + 600000 // 10 minutes
+            });
+
+            const params = new URLSearchParams({
+                client_id: clientId,
+                response_type: 'code',
+                state: state || csrfToken,
+                redirect_uri: process.env.OAUTH2_REDIRECT_URI
+            });
+
+            this.metrics.increment('oauth2.url.generation.success');
+            return `${process.env.OAUTH2_REDIRECT_URI}?${params.toString()}`;
+        } catch (error) {
+            this.metrics.increment('oauth2.url.generation.error');
+            this.logger.error('Authorization URL generation error:', error.message || 'Unknown error');
+            throw error;
+        }
+    }
+
+    async createAuthorizationCode(clientId, redirectUri, scope, state) {
+        try {
+            if (!clientId || !redirectUri) {
+                throw new Error('Missing required parameters');
+            }
+
+            // Validate CSRF token
+            const csrfData = this.csrfTokens.get(state);
+            if (!csrfData || csrfData.clientId !== clientId || Date.now() > csrfData.expiresAt) {
+                this.metrics.increment('oauth2.csrf.validation.error');
+                throw new Error('Invalid CSRF token');
+            }
+
+            const code = crypto.randomBytes(32).toString('hex');
+            const codeData = {
+                clientId,
+                redirectUri,
+                scope,
+                createdAt: Date.now(),
+                expiresAt: Date.now() + 600000 // 10 minutes
+            };
+
+            this.authorizationCodes.set(code, codeData);
+            this.metrics.increment('oauth2.code.generation.success');
+            
+            // Clean up used CSRF token
+            this.csrfTokens.delete(state);
+            
+            return code;
+        } catch (error) {
+            this.metrics.increment('oauth2.code.generation.error');
+            this.logger.error('Authorization code generation error:', error.message || 'Unknown error');
+            throw error;
+        }
+    }
+
+    async createOAuth2Session(code, clientId, redirectUri) {
+        try {
+            if (!code || !clientId || !redirectUri) {
+                throw new Error('Missing required parameters');
+            }
+
+            // Check if code has been used
+            if (this.usedAuthCodes.has(code)) {
+                this.metrics.increment('oauth2.validation.error');
+                throw new Error('Authorization code has already been used');
+            }
+
+            const codeData = this.authorizationCodes.get(code);
+            if (!codeData) {
+                this.metrics.increment('oauth2.validation.error');
                 throw new Error('Invalid authorization code');
             }
 
-            if (Date.now() > authCode.expiresAt) {
-                this.authCodes.delete(code);
+            if (codeData.clientId !== clientId) {
+                this.metrics.increment('oauth2.validation.error');
+                throw new Error('Client ID mismatch');
+            }
+
+            if (codeData.redirectUri !== redirectUri) {
+                this.metrics.increment('oauth2.validation.error');
+                throw new Error('Redirect URI mismatch');
+            }
+
+            if (Date.now() > codeData.expiresAt) {
+                this.metrics.increment('oauth2.validation.error');
                 throw new Error('Authorization code expired');
             }
 
-            // Generate access token
-            const accessToken = this.generateAccessToken(authCode.userId, authCode.clientId);
-            const refreshToken = this.generateRefreshToken(authCode.userId, authCode.clientId);
+            // Mark code as used
+            this.usedAuthCodes.add(code);
+            this.authorizationCodes.delete(code);
 
-            // Clean up used authorization code
-            this.authCodes.delete(code);
-
-            this.metrics?.oauth2TokenExchangeSuccess?.inc();
-            return {
-                access_token: accessToken,
-                refresh_token: refreshToken,
-                token_type: 'Bearer',
-                expires_in: this.accessTokenExpiry
-            };
-        } catch (error) {
-            logger.error('Failed to exchange code for token:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
-        }
-    }
-
-    /**
-     * Generate an access token
-     * @param {string} userId - User ID
-     * @param {string} clientId - Client ID
-     * @param {number} [timeOffset=0] - Optional time offset in seconds
-     * @returns {string} Access token
-     */
-    generateAccessToken(userId, clientId, timeOffset = 0) {
-        try {
-            const now = Math.floor(Date.now() / 1000) + timeOffset;
-            const token = jwt.sign(
-                {
-                    sub: userId,
-                    client_id: clientId,
-                    type: 'access',
-                    iat: now,
-                    exp: now + this.accessTokenExpiry
-                },
-                this.clientSecret,
-                { algorithm: 'HS256' }
-            );
-
-            this.accessTokens.set(token, {
-                userId,
+            // Create session
+            const token = jwt.sign({ clientId }, process.env.JWT_SECRET, { expiresIn: '1h' });
+            const session = {
+                token,
                 clientId,
-                expiresAt: (now + this.accessTokenExpiry) * 1000
-            });
-
-            this.metrics?.oauth2AccessTokenGenerated?.inc();
-            return token;
-        } catch (error) {
-            logger.error('Failed to generate access token:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
-        }
-    }
-
-    /**
-     * Generate a refresh token
-     * @param {string} userId - User ID
-     * @param {string} clientId - Client ID
-     * @returns {string} Refresh token
-     */
-    generateRefreshToken(userId, clientId) {
-        try {
-            const token = crypto.randomBytes(32).toString('hex');
-            const expiresAt = Date.now() + (this.refreshTokenExpiry * 1000);
-
-            this.refreshTokens.set(token, {
-                userId,
-                clientId,
-                expiresAt
-            });
-
-            this.metrics?.oauth2RefreshTokenGenerated?.inc();
-            return token;
-        } catch (error) {
-            logger.error('Failed to generate refresh token:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
-        }
-    }
-
-    /**
-     * Refresh an access token using a refresh token
-     * @param {string} refreshToken - Refresh token
-     * @returns {Promise<Object>} New access token and refresh token
-     */
-    async refreshAccessToken(refreshToken) {
-        try {
-            const tokenData = this.refreshTokens.get(refreshToken);
-            if (!tokenData) {
-                throw new Error('Invalid refresh token');
-            }
-
-            if (Date.now() > tokenData.expiresAt) {
-                this.refreshTokens.delete(refreshToken);
-                throw new Error('Refresh token expired');
-            }
-
-            // Generate new access token with a small time offset to ensure uniqueness
-            const newAccessToken = this.generateAccessToken(tokenData.userId, tokenData.clientId, 1);
-            const newRefreshToken = this.generateRefreshToken(tokenData.userId, tokenData.clientId);
-
-            // Clean up old refresh token
-            this.refreshTokens.delete(refreshToken);
-
-            this.metrics?.oauth2TokenRefreshSuccess?.inc();
-            return {
-                access_token: newAccessToken,
-                refresh_token: newRefreshToken,
-                token_type: 'Bearer',
-                expires_in: this.accessTokenExpiry
+                createdAt: Date.now(),
+                lastActivity: Date.now(),
+                expiresAt: Date.now() + 3600000 // 1 hour
             };
+
+            this.activeSessions.set(clientId, session);
+            this.metrics.increment('oauth2.session.creation.success');
+            
+            return session;
         } catch (error) {
-            logger.error('Failed to refresh access token:', error);
-            this.metrics?.oauth2Error?.inc();
+            this.metrics.increment('oauth2.session.creation.error');
+            this.logger.error('OAuth2 session creation error:', error.message || 'Unknown error');
             throw error;
         }
     }
 
-    /**
-     * Validate an access token
-     * @param {string} token - Access token to validate
-     * @returns {Promise<Object>} Decoded token data
-     */
-    async validateAccessToken(token) {
+    async stop() {
         try {
-            const tokenData = this.accessTokens.get(token);
-            if (!tokenData) {
-                throw new Error('Invalid access token');
-            }
-
-            if (Date.now() > tokenData.expiresAt) {
-                this.accessTokens.delete(token);
-                throw new Error('Access token expired');
-            }
-
-            const decoded = jwt.verify(token, this.clientSecret);
-            this.metrics?.oauth2TokenValidationSuccess?.inc();
-            return decoded;
+            this.authorizationCodes.clear();
+            this.activeSessions.clear();
+            this.csrfTokens.clear();
+            this.usedAuthCodes.clear();
+            this.logger.info('OAuth2Service stopped');
         } catch (error) {
-            logger.error('Failed to validate access token:', error);
-            this.metrics?.oauth2Error?.inc();
-            throw error;
+            this.logger.error('Error stopping OAuth2Service:', error.message || 'Unknown error');
         }
     }
 
-    /**
-     * Clean up expired tokens
-     */
-    cleanupExpiredTokens() {
-        const now = Date.now();
-
-        // Clean up expired access tokens
-        for (const [token, data] of this.accessTokens.entries()) {
-            if (now > data.expiresAt) {
-                this.accessTokens.delete(token);
-            }
+    async cleanup() {
+        try {
+            await this.stop();
+            this.logger.info('OAuth2Service cleanup completed');
+        } catch (error) {
+            this.logger.error('Error cleaning up OAuth2Service:', error.message || 'Unknown error');
         }
-
-        // Clean up expired refresh tokens
-        for (const [token, data] of this.refreshTokens.entries()) {
-            if (now > data.expiresAt) {
-                this.refreshTokens.delete(token);
-            }
-        }
-
-        // Clean up expired authorization codes
-        for (const [code, data] of this.authCodes.entries()) {
-            if (now > data.expiresAt) {
-                this.authCodes.delete(code);
-            }
-        }
-
-        this.metrics?.oauth2CleanupSuccess?.inc();
     }
 }
 

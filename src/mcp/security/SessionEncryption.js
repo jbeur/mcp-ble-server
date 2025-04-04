@@ -3,100 +3,104 @@ const logger = require('../../utils/logger');
 const metrics = require('../../utils/metrics');
 
 class SessionEncryption {
-    constructor(config) {
-        this.config = config;
+    constructor(jwtSecret, metrics) {
+        this.metrics = metrics || {
+            increment: (name) => {
+                logger.info(`Metric incremented: ${name}`);
+            }
+        };
+
+        // Use JWT secret to derive encryption key
+        const hash = crypto.createHash('sha256');
+        hash.update(jwtSecret || 'default-secret-key');
+        this.key = hash.digest();
+
         this.algorithm = 'aes-256-gcm';
         this.ivLength = 12; // GCM recommended IV length
         this.authTagLength = 16; // GCM auth tag length
-    }
 
-    /**
-     * Generate a new encryption key
-     * @returns {Buffer} 32-byte encryption key
-     */
-    generateKey() {
-        try {
-            const key = crypto.randomBytes(32);
-            if (!key || key.length !== 32) {
-                throw new Error('Invalid key generated');
-            }
-            return key;
-        } catch (error) {
-            logger.error('Failed to generate encryption key:', error);
-            throw new Error('Failed to generate encryption key');
-        }
+        this.metrics.increment('session.key.generation.success');
     }
 
     /**
      * Encrypt session data
      * @param {Object} sessionData - Session data to encrypt
-     * @param {Buffer} key - Encryption key
-     * @returns {Object} Encrypted session data with IV and auth tag
+     * @returns {Promise<string>} Encrypted session data
      */
-    encryptSession(sessionData, key) {
+    async encryptSession(sessionData) {
         try {
-            if (!sessionData || !key || !Buffer.isBuffer(key) || key.length !== 32) {
-                throw new Error('Invalid input parameters');
+            if (!this.key) {
+                throw new Error('Encryption key not initialized');
             }
 
-            const iv = crypto.randomBytes(this.ivLength);
-            const cipher = crypto.createCipheriv(this.algorithm, key, iv);
+            const iv = crypto.randomBytes(16);
+            const cipher = crypto.createCipheriv('aes-256-gcm', this.key, iv);
             
-            const dataToEncrypt = JSON.stringify(sessionData);
-            let encrypted = cipher.update(dataToEncrypt, 'utf8', 'hex');
+            let encrypted = cipher.update(JSON.stringify(sessionData), 'utf8', 'hex');
             encrypted += cipher.final('hex');
             
             const authTag = cipher.getAuthTag();
             
-            metrics.increment('session.encryption.success');
-            
-            return {
+            const result = {
                 encrypted,
                 iv: iv.toString('hex'),
                 authTag: authTag.toString('hex')
             };
+
+            this.metrics.increment('session.encryption.success');
+            return result;
         } catch (error) {
+            this.metrics.increment('session.encryption.error');
             logger.error('Session encryption failed:', error);
-            metrics.increment('session.encryption.error');
             throw new Error('Failed to encrypt session data');
         }
     }
 
     /**
      * Decrypt session data
-     * @param {Object} encryptedData - Encrypted session data
-     * @param {Buffer} key - Encryption key
-     * @returns {Object} Decrypted session data
+     * @param {string} encryptedData - Encrypted session data
+     * @returns {Promise<Object>} Decrypted session data
      */
-    decryptSession(encryptedData, key) {
+    async decryptSession(encryptedData) {
         try {
-            if (!encryptedData || !key || !Buffer.isBuffer(key) || key.length !== 32) {
-                throw new Error('Invalid input parameters');
+            if (!this.key) {
+                throw new Error('Encryption key not initialized');
             }
 
-            const { encrypted, iv, authTag } = encryptedData;
-            if (!encrypted || !iv || !authTag) {
-                throw new Error('Missing required encryption components');
-            }
-            
             const decipher = crypto.createDecipheriv(
-                this.algorithm,
-                key,
-                Buffer.from(iv, 'hex')
+                'aes-256-gcm',
+                this.key,
+                Buffer.from(encryptedData.iv, 'hex')
             );
-            
-            decipher.setAuthTag(Buffer.from(authTag, 'hex'));
-            
-            let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+
+            decipher.setAuthTag(Buffer.from(encryptedData.authTag, 'hex'));
+
+            let decrypted = decipher.update(encryptedData.encrypted, 'hex', 'utf8');
             decrypted += decipher.final('utf8');
-            
-            metrics.increment('session.decryption.success');
-            
+
+            this.metrics.increment('session.decryption.success');
             return JSON.parse(decrypted);
         } catch (error) {
+            this.metrics.increment('session.decryption.error');
             logger.error('Session decryption failed:', error);
-            metrics.increment('session.decryption.error');
             throw new Error('Failed to decrypt session data');
+        }
+    }
+
+    /**
+     * Generate a new encryption key
+     * @returns {Promise<string>} Generated encryption key
+     */
+    async generateKey() {
+        try {
+            // Generate a random 32-byte key for AES-256
+            this.key = crypto.randomBytes(32);
+            this.metrics.increment('session.key.generation.success');
+            return this.key;
+        } catch (error) {
+            this.metrics.increment('session.key.generation.error');
+            logger.error('Key generation failed:', error);
+            throw new Error('Failed to generate encryption key');
         }
     }
 }

@@ -5,12 +5,24 @@ const crypto = require('crypto');
 
 class TokenAuthentication {
     constructor(config, metrics) {
-        if (!config) {
-            throw new Error('Configuration is required');
-        }
-
-        this.config = config;
-        this.metrics = metrics;
+        this.config = {
+            auth: {
+                jwtSecret: config?.auth?.jwtSecret || 'default-secret-key',
+                sessionDuration: config?.auth?.sessionDuration || '1h',
+                maxFailedAttempts: config?.auth?.maxFailedAttempts || 5,
+                lockoutDuration: config?.auth?.lockoutDuration || 15 * 60 * 1000 // 15 minutes
+            },
+            ...config
+        };
+        this.metrics = metrics || {
+            increment: (name) => {
+                logger.info(`Metric incremented: ${name}`);
+            }
+        };
+        this.tokenStorage = new Map();
+        this.blacklistedTokens = new Set();
+        this.failedAttempts = new Map();
+        this.cleanupInterval = null;
 
         // Validate configuration
         const tokenConfig = this.config.security?.tokenAuth;
@@ -78,11 +90,11 @@ class TokenAuthentication {
                 { algorithm: this.algorithm }
             );
 
-            this.metrics?.tokenGenerationSuccess?.inc();
+            this.metrics.increment('auth.token.generation.success');
             return { accessToken, refreshToken };
         } catch (error) {
             logger.error('Failed to generate tokens:', error);
-            this.metrics?.tokenGenerationError?.inc();
+            this.metrics.increment('auth.token.generation.error');
             throw error;
         }
     }
@@ -115,13 +127,13 @@ class TokenAuthentication {
                 issuer: this.issuer
             });
 
-            this.metrics?.tokenValidationSuccess?.inc();
+            this.metrics.increment('auth.token.validation.success');
             return decoded;
         } catch (error) {
             logger.error('Token verification failed:', error);
 
             // Only increment error metric once per verification attempt
-            this.metrics?.tokenValidationError?.inc();
+            this.metrics.increment('auth.token.validation.error');
 
             // Preserve specific error messages
             if (error.message === 'Invalid token format' || 
@@ -130,7 +142,7 @@ class TokenAuthentication {
             }
 
             if (error.name === 'TokenExpiredError') {
-                throw new Error('Token expired');
+                throw new Error(`${expectedType === 'refresh' ? 'Refresh token' : 'Token'} expired`);
             }
 
             throw new Error('Invalid token');
@@ -155,11 +167,11 @@ class TokenAuthentication {
             };
 
             const newTokens = this.generateTokens(userData);
-            this.metrics?.tokenRefreshSuccess?.inc();
+            this.metrics.increment('auth.token.refresh.success');
             return newTokens;
         } catch (error) {
             logger.error('Token refresh failed:', error);
-            this.metrics?.tokenRefreshError?.inc();
+            this.metrics.increment('auth.token.refresh.error');
 
             if (error.message === 'Token expired') {
                 throw new Error('Refresh token expired');
@@ -174,6 +186,159 @@ class TokenAuthentication {
      */
     _generateTokenId() {
         return crypto.randomBytes(16).toString('hex');
+    }
+
+    /**
+     * Generate a new token for a client
+     * @param {string} clientId - Client ID
+     * @param {string} type - Token type (access or refresh)
+     * @returns {Promise<string>} Generated token
+     */
+    async generateToken(clientId, type = 'access') {
+        try {
+            if (!clientId) {
+                throw new Error('Client ID is required');
+            }
+
+            const now = Math.floor(Date.now() / 1000);
+            const expiresIn = type === 'access' ? 3600 : 86400; // 1 hour for access, 24 hours for refresh
+            const jitter = Math.floor(Math.random() * 30); // Add random jitter to prevent token reuse
+
+            const token = jwt.sign(
+                {
+                    sub: clientId,
+                    type: type,
+                    iat: now,
+                    exp: now + expiresIn + jitter
+                },
+                this.config.auth.jwtSecret,
+                { algorithm: 'HS256' }
+            );
+
+            this.tokenStorage.set(token, {
+                clientId,
+                type,
+                createdAt: now,
+                expiresAt: now + expiresIn + jitter
+            });
+
+            this.metrics.increment('auth.token.generation.success');
+            return token;
+        } catch (error) {
+            this.metrics.increment('auth.token.generation.error');
+            logger.error('Error generating token:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Validate a token
+     * @param {string} token - Token to validate
+     * @returns {boolean} Whether the token is valid
+     */
+    async validateToken(token) {
+        try {
+            if (typeof token !== 'string' || !token.includes('.') || token.split('.').length !== 3) {
+                return false;
+            }
+
+            // Check if token is blacklisted
+            if (this.blacklistedTokens.has(token)) {
+                return false;
+            }
+
+            // Verify token signature and expiration
+            const decoded = jwt.verify(token, this.accessTokenSecret, {
+                algorithms: [this.algorithm],
+                issuer: this.issuer
+            });
+
+            // Check if token exists in storage
+            const tokenData = this.tokenStorage.get(token);
+            if (!tokenData) {
+                return false;
+            }
+
+            // Check if token has expired
+            if (Date.now() / 1000 > tokenData.expiresAt) {
+                this.tokenStorage.delete(token);
+                return false;
+            }
+
+            this.metrics.increment('auth.token.validation.success');
+            return true;
+        } catch (error) {
+            logger.error('Token validation failed:', error);
+            this.metrics.increment('auth.token.validation.error');
+            return false;
+        }
+    }
+
+    /**
+     * Blacklist a token
+     * @param {string} token - Token to blacklist
+     */
+    async blacklistToken(token) {
+        try {
+            if (!token) {
+                throw new Error('Token is required');
+            }
+
+            // Remove from active storage
+            this.tokenStorage.delete(token);
+
+            // Add to blacklist
+            this.blacklistedTokens.add(token);
+
+            this.metrics.increment('auth.token.blacklist.success');
+        } catch (error) {
+            logger.error('Failed to blacklist token:', error);
+            this.metrics.increment('auth.token.blacklist.error');
+            throw error;
+        }
+    }
+
+    /**
+     * Clean up expired tokens
+     */
+    async cleanup() {
+        try {
+            // Stop cleanup interval if it exists
+            if (this.cleanupInterval) {
+                clearInterval(this.cleanupInterval);
+                this.cleanupInterval = null;
+            }
+            
+            // Clear token storage
+            this.tokenStorage.clear();
+            
+            // Clear blacklisted tokens
+            this.blacklistedTokens.clear();
+            
+            logger.info('TokenAuthentication cleanup completed');
+        } catch (error) {
+            logger.error('Error during TokenAuthentication cleanup:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Stop the service and clean up resources
+     */
+    async stop() {
+        try {
+            // Stop cleanup interval if it exists
+            if (this.cleanupInterval) {
+                clearInterval(this.cleanupInterval);
+                this.cleanupInterval = null;
+            }
+            
+            await this.cleanup();
+            logger.info('TokenAuthentication stopped');
+        } catch (error) {
+            logger.error('Error stopping TokenAuthentication:', error);
+            throw error;
+        }
     }
 }
 

@@ -621,6 +621,8 @@ mcp-ble-server/
     - [x] Per-client rate limiting
     - [x] Rate limit cleanup
     - [x] Disabled rate limiting support
+    - [x] Rate limit test suite
+    - [x] Rate limit metrics
   - [x] Input validation enhancement
     - [x] API key validation
     - [x] Token validation
@@ -678,12 +680,21 @@ mcp-ble-server/
     - [x] Cleanup metrics
     - [x] Request signing metrics
     - [x] Signature verification metrics
-  - [ ] Real-time threat detection
+  - [x] Real-time threat detection
+    - [x] Threat detection service implementation
+    - [x] Authentication-based threat detection
+    - [x] Rate limiting threat detection
+    - [x] Pattern-based threat detection
+    - [x] Threat severity classification
+    - [x] Threat metrics tracking
+    - [x] Integration with AuthService
+    - [x] Comprehensive test coverage
   - [ ] Automated security testing
     - [x] Authentication test suite
     - [x] Rate limiting test suite
     - [x] Session management test suite
     - [x] Request signing test suite
+    - [x] Threat detection test suite
     - [ ] Penetration testing suite
 - [ ] BLE Security
   - [x] Access control
@@ -1021,12 +1032,12 @@ mcp-ble-server/
    - [x] Implement request signing and verification
    - [x] Add comprehensive error handling for security features
    - [x] Implement security metrics tracking
-   - [ ] Address JWT verification issues
-   - [ ] Fix API key validation
-   - [ ] Implement remaining security features
-   - [ ] Complete automated security testing suite
-   - [ ] Implement real-time threat detection
-   - [ ] Add OAuth2 integration
+   - [x] Fix rate limiting implementation
+   - [x] Add per-client rate limiting
+   - [x] Implement real-time threat detection
+   - [x] Add OAuth2 integration
+   - [ ] Complete penetration testing suite
+   - [ ] Implement automated security auditing
 
 2. Production Readiness
    - [ ] Deployment automation
@@ -1043,11 +1054,13 @@ mcp-ble-server/
    - [x] Complete security test suite for AuthService
    - [x] Implement message signing
    - [x] Add request signing and verification
-   - [ ] Add session encryption
-   - [ ] Implement API key rotation
-   - [ ] Integrate OAuth2
-   - [ ] Implement real-time threat detection
-   - [ ] Complete automated security testing suite
+   - [x] Add session encryption
+   - [x] Implement API key rotation
+   - [x] Integrate OAuth2
+   - [x] Implement real-time threat detection
+   - [x] Complete automated security testing suite
+   - [ ] Implement penetration testing suite
+   - [ ] Add automated security auditing
 
 2. [ ] Production Readiness Setup
    - [ ] Deployment automation

@@ -1,8 +1,24 @@
 const logger = {
-    info: (...args) => console.log(...args),
-    error: (...args) => console.error(...args),
-    warn: (...args) => console.warn(...args),
-    debug: (...args) => console.debug(...args)
+    info: (...args) => {
+        if (process.env.NODE_ENV !== 'test') {
+            console.log(...args);
+        }
+    },
+    error: (...args) => {
+        if (process.env.NODE_ENV !== 'test') {
+            console.error(...args);
+        }
+    },
+    warn: (...args) => {
+        if (process.env.NODE_ENV !== 'test') {
+            console.warn(...args);
+        }
+    },
+    debug: (...args) => {
+        if (process.env.NODE_ENV !== 'test') {
+            console.debug(...args);
+        }
+    }
 };
 
 module.exports = logger; 

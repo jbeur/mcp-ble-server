@@ -1,6 +1,8 @@
 /**
  * Simple metrics tracking module
  */
+const logger = require('./logger');
+
 class Metrics {
     constructor() {
         this.metrics = new Map();
@@ -15,6 +17,7 @@ class Metrics {
         const key = this._getKey(name, labels);
         const currentValue = this.metrics.get(key) || 0;
         this.metrics.set(key, currentValue + 1);
+        logger.info(`Metric incremented: ${name}`);
     }
 
     /**
@@ -101,6 +104,18 @@ class Metrics {
         const currentValue = this.metrics.get(key) || 0;
         this.metrics.set(key, (currentValue + value) / 2); // Simple average
     }
+
+    get(name) {
+        return this.metrics.get(name) || 0;
+    }
+
+    reset(name) {
+        this.metrics.delete(name);
+    }
+
+    resetAll() {
+        this.metrics.clear();
+    }
 }
 
 // Export singleton instance
@@ -134,4 +149,4 @@ const prometheusMetrics = {
     })
 };
 
-module.exports = metricsModule; 
+module.exports = metrics; 
