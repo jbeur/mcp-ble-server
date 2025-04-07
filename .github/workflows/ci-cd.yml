@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14.x'
+          node-version: '18.x'
           cache: 'npm'
           
       - name: Install dependencies
@@ -28,6 +28,7 @@ jobs:
           CI: true
           
       - name: Upload coverage reports
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v3
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -41,7 +42,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14.x'
+          node-version: '18.x'
           
       - name: Install dependencies
         run: npm ci
@@ -58,7 +59,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14.x'
+          node-version: '18.x'
           
       - name: Install dependencies
         run: npm ci
@@ -84,7 +85,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14.x'
+          node-version: '18.x'
           
       - name: Install dependencies
         run: npm ci
@@ -113,7 +114,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14.x'
+          node-version: '18.x'
           
       - name: Install dependencies
         run: npm ci
@@ -122,6 +123,7 @@ jobs:
         run: npm run build
         
       - name: Deploy to staging
+        if: ${{ secrets.DEPLOY_KEY != '' }}
         run: |
           # Set up SSH
           mkdir -p ~/.ssh
