@@ -28,10 +28,10 @@ jobs:
           CI: true
           
       - name: Upload coverage reports
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v3
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
           
   lint:
     name: Lint
@@ -123,11 +123,11 @@ jobs:
         run: npm run build
         
       - name: Deploy to staging
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         run: |
           # Set up SSH
           mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          echo "${{ env.DEPLOY_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           
           # Add staging server to known hosts
@@ -138,4 +138,4 @@ jobs:
             dist/ \
             deploy@34.238.42.210:/var/www/mcp-ble-server/
         env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }} 
+          DEPLOY_KEY: ${{ env.DEPLOY_KEY }} 
