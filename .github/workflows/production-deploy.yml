@@ -1,0 +1,187 @@
+name: Production Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      force:
+        description: 'Force deployment (skip checks)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run tests
+        run: npm test
+        env:
+          CI: true
+          
+      - name: Run security audit
+        if: ${{ !inputs.force }}
+        run: npm audit
+        
+      - name: Check version
+        run: |
+          if ! grep -q "\"version\": \"${{ inputs.version }}\"" package.json; then
+            echo "Version mismatch in package.json"
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: dist
+          path: dist
+
+  deploy:
+    name: Deploy to Environment
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.alb_dns_name }}
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: dist
+          path: dist
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.7"
+
+      - name: Terraform Init
+        working-directory: infrastructure/${{ inputs.environment }}
+        run: terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infrastructure/${{ inputs.environment }}
+        run: |
+          terraform plan \
+            -var-file="terraform.tfvars" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        id: deploy
+        working-directory: infrastructure/${{ inputs.environment }}
+        run: |
+          terraform apply -auto-approve tfplan
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: infrastructure/${{ inputs.environment }}/tfplan
+
+      - name: Deploy Application
+        run: |
+          # Set up AWS CLI
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region us-east-1
+
+          # Create backup of current deployment
+          aws s3 sync s3://${{ inputs.environment }}-mcp-ble-server-assets/ s3://${{ inputs.environment }}-mcp-ble-server-backup/$(date +%Y%m%d%H%M%S)/
+
+          # Upload new application files to S3
+          aws s3 sync dist/ s3://${{ inputs.environment }}-mcp-ble-server-assets/
+
+          # Update EC2 instances (using AWS Systems Manager)
+          aws ssm send-command \
+            --targets "Key=tag:Environment,Values=${{ inputs.environment }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["cd /var/www/mcp-ble-server && aws s3 sync s3://${{ inputs.environment }}-mcp-ble-server-assets/ . && npm ci --production && pm2 reload ecosystem.config.js"]
+
+      - name: Verify deployment
+        run: |
+          # Wait for ALB target group to be healthy
+          aws elbv2 wait target-health-in-service \
+            --target-group-arn $(terraform output -raw target_group_arn) \
+            --region us-east-1
+
+      - name: Run smoke tests
+        if: ${{ inputs.environment == 'production' }}
+        run: |
+          # Run smoke tests against production environment
+          npm run test:smoke -- --env=production
+
+      - name: Monitor deployment
+        if: ${{ inputs.environment == 'production' }}
+        run: |
+          # Monitor application health for 5 minutes
+          for i in {1..30}; do
+            if curl -s -f "${{ steps.deploy.outputs.alb_dns_name }}/health" | grep -q "healthy"; then
+              echo "Application is healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Application health check failed"
+          exit 1
+
+      - name: Rollback if needed
+        if: failure()
+        run: |
+          # Restore from backup if deployment fails
+          aws s3 sync s3://${{ inputs.environment }}-mcp-ble-server-backup/$(ls -t s3://${{ inputs.environment }}-mcp-ble-server-backup/ | head -n1) s3://${{ inputs.environment }}-mcp-ble-server-assets/
+          
+          # Update EC2 instances with backup
+          aws ssm send-command \
+            --targets "Key=tag:Environment,Values=${{ inputs.environment }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["cd /var/www/mcp-ble-server && aws s3 sync s3://${{ inputs.environment }}-mcp-ble-server-assets/ . && npm ci --production && pm2 reload ecosystem.config.js"] 

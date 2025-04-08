@@ -2,9 +2,9 @@ name: MCP BLE Server CI/CD
 
 on:
   push:
-    branches: [ main, test-deployment ]
+    branches: [ main, staging ]
   pull_request:
-    branches: [ main, test-deployment ]
+    branches: [ main, staging ]
 
 jobs:
   test:
@@ -28,10 +28,10 @@ jobs:
           CI: true
           
       - name: Upload coverage reports
-        if: env.CODECOV_TOKEN != ''
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: codecov/codecov-action@v3
         with:
-          token: ${{ env.CODECOV_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
           
   lint:
     name: Lint
@@ -99,43 +99,106 @@ jobs:
             echo "Build failed - dist directory not found"
             exit 1
           fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: dist
+          path: dist
           
-  deploy:
-    name: Deploy
+  deploy-staging:
+    name: Deploy to Staging
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: 
       name: staging
-      url: https://staging.mcp-ble-server.example.com
+      url: ${{ steps.deploy.outputs.alb_dns_name }}
+    
+    permissions:
+      id-token: write
+      contents: read
+    
     steps:
       - uses: actions/checkout@v3
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
         with:
-          node-version: '18.x'
-          
-      - name: Install dependencies
-        run: npm ci
-        
-      - name: Build
-        run: npm run build
-        
-      - name: Deploy to staging
-        if: env.DEPLOY_KEY != ''
-        run: |
-          # Set up SSH
-          mkdir -p ~/.ssh
-          echo "${{ env.DEPLOY_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          
-          # Add staging server to known hosts
-          ssh-keyscan -H 34.238.42.210 >> ~/.ssh/known_hosts
-          
-          # Deploy using rsync
-          rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" \
-            dist/ \
-            deploy@34.238.42.210:/var/www/mcp-ble-server/
+          name: dist
+          path: dist
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.7"
+
+      - name: Terraform Init
+        working-directory: infrastructure/staging
+        run: terraform init
         env:
-          DEPLOY_KEY: ${{ env.DEPLOY_KEY }} 
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infrastructure/staging
+        run: |
+          terraform plan \
+            -var-file="terraform.tfvars" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        id: deploy
+        working-directory: infrastructure/staging
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          terraform apply -auto-approve tfplan
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan
+          path: infrastructure/staging/tfplan
+
+      - name: Deploy Application
+        run: |
+          # Set up AWS CLI
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region us-east-1
+
+          # Upload application files to S3
+          aws s3 sync dist/ s3://staging-mcp-ble-server-assets/
+
+          # Update EC2 instances (using AWS Systems Manager)
+          aws ssm send-command \
+            --targets "Key=tag:Environment,Values=staging" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["cd /var/www/mcp-ble-server && aws s3 sync s3://staging-mcp-ble-server-assets/ . && npm ci --production && pm2 reload ecosystem.config.js"]
+
+      - name: Verify deployment
+        run: |
+          # Wait for ALB target group to be healthy
+          aws elbv2 wait target-health-in-service \
+            --target-group-arn $(terraform output -raw target_group_arn) \
+            --region us-east-1
+
+      - name: Run staging tests
+        run: |
+          # Run integration tests against staging environment
+          npm run test:integration -- --env=staging 
