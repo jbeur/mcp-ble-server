@@ -2,6 +2,7 @@ const { logger } = require('./logger');
 const { metrics } = require('./metrics');
 const Buffer = global.Buffer;
 const { Writable } = require('stream');
+const { Transform } = require('stream');
 
 class Base64Utils {
   constructor(config = {}) {
@@ -12,18 +13,22 @@ class Base64Utils {
       useHardwareAcceleration: config.useHardwareAcceleration !== false // Enable hardware acceleration by default
     };
 
+    // Initialize logger and metrics
+    this.logger = logger;
+    this.metrics = metrics;
+
     // Initialize metrics
     if (this.config.metricsEnabled) {
-      metrics.gauge('base64_operations_total', 0);
-      metrics.gauge('base64_errors_total', 0);
-      metrics.gauge('base64_processing_time_ms', 0);
-      metrics.gauge('base64_hardware_acceleration_enabled', this.config.useHardwareAcceleration ? 1 : 0);
+      this.metrics.gauge('base64_operations_total', 0);
+      this.metrics.gauge('base64_errors_total', 0);
+      this.metrics.gauge('base64_processing_time_ms', 0);
+      this.metrics.gauge('base64_hardware_acceleration_enabled', this.config.useHardwareAcceleration ? 1 : 0);
     }
 
     // Check if hardware acceleration is available
     this.hardwareAccelerationAvailable = this.checkHardwareAcceleration();
     if (this.config.metricsEnabled) {
-      metrics.gauge('base64_hardware_acceleration_available', this.hardwareAccelerationAvailable ? 1 : 0);
+      this.metrics.gauge('base64_hardware_acceleration_available', this.hardwareAccelerationAvailable ? 1 : 0);
     }
   }
 
@@ -53,33 +58,13 @@ class Base64Utils {
   encode(data, options = {}) {
     const startTime = process.hrtime();
     try {
-      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      let encoded;
-
-      if (this.hardwareAccelerationAvailable && this.config.useHardwareAcceleration) {
-        // Use native Buffer operations for hardware acceleration
-        encoded = buffer.toString('base64');
-      } else {
-        // Fallback to standard encoding
-        encoded = buffer.toString('base64');
-      }
-
-      if (this.config.metricsEnabled) {
-        metrics.increment('base64_operations_total', { 
-          operation: 'encode',
-          hardware_accelerated: this.hardwareAccelerationAvailable && this.config.useHardwareAcceleration ? 'true' : 'false'
-        });
-        const [seconds, nanoseconds] = process.hrtime(startTime);
-        const duration = seconds * 1000 + nanoseconds / 1000000;
-        metrics.observe('base64_processing_time_ms', duration);
-      }
-
+      const buffer = Buffer.from(data);
+      const encoded = buffer.toString('base64');
+      this.metrics.increment('base64.encode.success');
       return encoded;
     } catch (error) {
-      if (this.config.metricsEnabled) {
-        metrics.increment('base64_errors_total', { operation: 'encode' });
-      }
-      logger.error('Base64 encoding error:', { error });
+      this.logger.error('Error encoding data to base64:', error);
+      this.metrics.increment('base64.encode.error');
       throw error;
     }
   }
@@ -126,42 +111,18 @@ class Base64Utils {
      * @param {Object} options - Decoding options
      * @returns {Buffer} Decoded buffer
      */
-  decode(data, options = {}) {
+  decode(base64String, options = {}) {
     const startTime = process.hrtime();
     try {
-      // Trim whitespace and validate input
-      if (typeof data === 'string') {
-        data = data.trim();
-      }
-      if (!this.isValid(data)) {
+      if (!this.isValid(base64String)) {
         throw new Error('Invalid base64 string');
       }
-
-      let decoded;
-      if (this.hardwareAccelerationAvailable && this.config.useHardwareAcceleration) {
-        // Use native Buffer operations for hardware acceleration
-        decoded = Buffer.from(data, 'base64');
-      } else {
-        // Fallback to standard decoding
-        decoded = Buffer.from(data, 'base64');
-      }
-            
-      if (this.config.metricsEnabled) {
-        metrics.increment('base64_operations_total', { 
-          operation: 'decode',
-          hardware_accelerated: this.hardwareAccelerationAvailable && this.config.useHardwareAcceleration ? 'true' : 'false'
-        });
-        const [seconds, nanoseconds] = process.hrtime(startTime);
-        const duration = seconds * 1000 + nanoseconds / 1000000;
-        metrics.observe('base64_processing_time_ms', duration);
-      }
-
-      return decoded;
+      const buffer = Buffer.from(base64String, 'base64');
+      this.metrics.increment('base64.decode.success');
+      return buffer;
     } catch (error) {
-      if (this.config.metricsEnabled) {
-        metrics.increment('base64_errors_total', { operation: 'decode' });
-      }
-      logger.error('Base64 decoding error:', { error });
+      this.logger.error('Error decoding base64 string:', error);
+      this.metrics.increment('base64.decode.error');
       throw error;
     }
   }
@@ -172,36 +133,28 @@ class Base64Utils {
      * @param {Writable} output - Output stream
      * @returns {Promise<void>}
      */
-  streamEncode(inputStream, options = {}) {
+  streamEncode(inputStream, outputStream, options = {}) {
     return new Promise((resolve, reject) => {
-      let hasError = false;
-      const self = this;  // Capture the Base64Utils instance
-      const outputStream = new Writable({
-        write(chunk, encoding, callback) {
+      const transform = new Transform({
+        transform(chunk, encoding, callback) {
           try {
-            if (hasError) {
-              callback();
-              return;
-            }
-            const encoded = chunk.toString('base64');
-            this.push(encoded);
-            callback();
+            const buffer = Buffer.from(chunk);
+            const encoded = buffer.toString('base64');
+            callback(null, encoded);
           } catch (error) {
-            hasError = true;
-            if (self.config.metricsEnabled) {
-              metrics.increment('base64_encode_errors', { type: 'stream' });
-            }
             callback(error);
           }
         }
       });
 
+      let hasError = false;
+
       const cleanup = () => {
         inputStream.removeAllListeners();
+        transform.removeAllListeners();
         outputStream.removeAllListeners();
-        if (!inputStream.destroyed) {
-          inputStream.destroy();
-        }
+        if (!inputStream.destroyed) inputStream.destroy();
+        if (!transform.destroyed) transform.destroy();
       };
 
       const handleError = (error) => {
@@ -215,16 +168,18 @@ class Base64Utils {
       };
 
       inputStream.on('error', handleError);
+      transform.on('error', handleError);
       outputStream.on('error', handleError);
 
-      inputStream.on('end', () => {
+      transform.on('end', () => {
         if (!hasError) {
-          outputStream.end();
-          resolve(outputStream);
+          resolve();
         }
       });
 
-      inputStream.pipe(outputStream);
+      inputStream
+        .pipe(transform)
+        .pipe(outputStream, { end: true });
     });
   }
 
@@ -297,9 +252,7 @@ class Base64Utils {
       });
 
       outputStream.on('drain', () => {
-        if (!hasError) {
-          inputStream.resume();
-        }
+        inputStream.resume();
       });
 
       inputStream.on('end', () => {
@@ -308,24 +261,11 @@ class Base64Utils {
           if (buffer.length > 0) {
             const decoded = decodeChunk(buffer);
             if (decoded.length > 0) {
-              outputStream.write(decoded, () => {
-                outputStream.end(() => {
-                  cleanup();
-                  resolve();
-                });
-              });
-            } else {
-              outputStream.end(() => {
-                cleanup();
-                resolve();
-              });
+              outputStream.write(decoded);
             }
-          } else {
-            outputStream.end(() => {
-              cleanup();
-              resolve();
-            });
           }
+          outputStream.end();
+          resolve();
         } catch (error) {
           handleError(error);
         }
@@ -334,4 +274,4 @@ class Base64Utils {
   }
 }
 
-module.exports = Base64Utils; 
+module.exports = { Base64Utils };

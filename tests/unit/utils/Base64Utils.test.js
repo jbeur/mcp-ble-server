@@ -1,5 +1,5 @@
 const { Readable, Writable } = require('stream');
-const Base64Utils = require('../../../src/utils/Base64Utils');
+const { Base64Utils } = require('../../../src/utils/Base64Utils');
 
 // Mock metrics module
 jest.mock('../../../src/utils/metrics', () => ({
@@ -22,11 +22,26 @@ jest.mock('../../../src/utils/logger', () => ({
 
 describe('Base64Utils', () => {
   let base64Utils;
+  let mockLogger;
+  let mockMetrics;
 
   beforeEach(() => {
-    // Clear all mocks before each test
-    jest.clearAllMocks();
+    mockLogger = {
+      error: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      debug: jest.fn()
+    };
+
+    mockMetrics = {
+      increment: jest.fn(),
+      gauge: jest.fn(),
+      histogram: jest.fn()
+    };
+
     base64Utils = new Base64Utils();
+    base64Utils.logger = mockLogger;
+    base64Utils.metrics = mockMetrics;
   });
 
   afterEach(() => {

@@ -1,6 +1,6 @@
-import assert from 'assert';
-import { ConnectionPool } from '../../../src/ble/ConnectionPool.js';
-import logger from '../../../src/utils/logger.js';
+const assert = require('assert');
+const { ConnectionPool } = require('../../../src/ble/ConnectionPool');
+const logger = require('../../../src/utils/logger');
 
 describe('Connection Pool', () => {
   let connectionPool;
