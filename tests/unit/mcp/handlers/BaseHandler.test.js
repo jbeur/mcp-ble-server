@@ -1,38 +1,43 @@
-const BaseHandler = require('../../../../src/mcp/handlers/BaseHandler');
-const { logger } = require('../../../../src/utils/logger');
-const { metrics } = require('../../../../src/utils/metrics');
-const { MessageBuilder, ErrorCodes } = require('../../../../src/mcp/protocol/messages');
-
-// Mock dependencies
-jest.mock('../../../../src/utils/logger');
-jest.mock('../../../../src/utils/metrics');
-jest.mock('../../../../src/mcp/protocol/messages', () => ({
-  MessageBuilder: {
-    buildError: jest.fn()
-  },
-  ErrorCodes: {
-    INTERNAL_ERROR: 'INTERNAL_ERROR'
+// Mock logger first
+const mockLogger = {
+  logger: {
+    info: jest.fn(),
+    error: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn()
   }
-}));
+};
+
+jest.mock('../../../../src/utils/logger', () => mockLogger);
+
+const BaseHandler = require('../../../../src/mcp/handlers/BaseHandler');
+const { MessageBuilder, ErrorCodes } = require('../../../../src/mcp/protocol/messages');
 
 describe('BaseHandler', () => {
   let handler;
   let mockServer;
-  let mockBleService;
+  let mockMetrics;
 
   beforeEach(() => {
-    // Create mock server
+    jest.clearAllMocks();
+    
     mockServer = {
       sendToClient: jest.fn()
     };
 
-    // Create mock BLE service
-    mockBleService = {};
+    mockMetrics = {
+      mcpMessageLatency: {
+        observe: jest.fn()
+      },
+      mcpErrors: {
+        inc: jest.fn()
+      }
+    };
 
-    // Create handler instance
-    handler = new BaseHandler(mockServer, mockBleService);
+    handler = new BaseHandler(mockServer, mockMetrics);
+  });
 
-    // Reset mocks
+  afterEach(() => {
     jest.clearAllMocks();
   });
 
@@ -47,7 +52,7 @@ describe('BaseHandler', () => {
       await handler.handleMessage(clientId, message);
 
       expect(handler.processMessage).toHaveBeenCalledWith(clientId, message);
-      expect(metrics.mcpMessageLatency.observe).toHaveBeenCalled();
+      expect(mockMetrics.mcpMessageLatency.observe).toHaveBeenCalled();
     });
 
     it('should handle invalid message format', async () => {
@@ -56,8 +61,8 @@ describe('BaseHandler', () => {
 
       await handler.handleMessage(clientId, message);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
+      expect(mockLogger.logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
+      expect(mockMetrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
       expect(mockServer.sendToClient).toHaveBeenCalled();
     });
 
@@ -67,8 +72,8 @@ describe('BaseHandler', () => {
 
       await handler.handleMessage(clientId, message);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
+      expect(mockLogger.logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
+      expect(mockMetrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
       expect(mockServer.sendToClient).toHaveBeenCalled();
     });
 
@@ -82,8 +87,8 @@ describe('BaseHandler', () => {
 
       await handler.handleMessage(clientId, message);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
+      expect(mockLogger.logger.error).toHaveBeenCalledWith('Error handling message', expect.any(Object));
+      expect(mockMetrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
       expect(mockServer.sendToClient).toHaveBeenCalled();
     });
   });
@@ -122,8 +127,8 @@ describe('BaseHandler', () => {
 
       handler.handleError(clientId, error);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling message', { clientId, error });
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: 'CUSTOM_ERROR' });
+      expect(mockLogger.logger.error).toHaveBeenCalledWith('Error handling message', { clientId, error });
+      expect(mockMetrics.mcpErrors.inc).toHaveBeenCalledWith({ type: 'CUSTOM_ERROR' });
       expect(MessageBuilder.buildError).toHaveBeenCalledWith('CUSTOM_ERROR', 'Custom error');
     });
 
@@ -133,8 +138,8 @@ describe('BaseHandler', () => {
 
       handler.handleError(clientId, error);
 
-      expect(logger.error).toHaveBeenCalledWith('Error handling message', { clientId, error });
-      expect(metrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
+      expect(mockLogger.logger.error).toHaveBeenCalledWith('Error handling message', { clientId, error });
+      expect(mockMetrics.mcpErrors.inc).toHaveBeenCalledWith({ type: ErrorCodes.INTERNAL_ERROR });
       expect(MessageBuilder.buildError).toHaveBeenCalledWith(ErrorCodes.INTERNAL_ERROR, 'Generic error');
     });
   });

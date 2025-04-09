@@ -59,21 +59,22 @@ class CircuitBreaker {
 
   allowRequest(connectionId) {
     const state = this.getState(connectionId);
+    let requests;
 
     switch (state) {
-      case STATES.CLOSED:
+    case STATES.CLOSED:
+      return true;
+    case STATES.OPEN:
+      return false;
+    case STATES.HALF_OPEN:
+      requests = this.halfOpenRequests.get(connectionId) || 0;
+      if (requests < this.options.halfOpenLimit) {
+        this.halfOpenRequests.set(connectionId, requests + 1);
         return true;
-      case STATES.OPEN:
-        return false;
-      case STATES.HALF_OPEN:
-        const requests = this.halfOpenRequests.get(connectionId) || 0;
-        if (requests < this.options.halfOpenLimit) {
-          this.halfOpenRequests.set(connectionId, requests + 1);
-          return true;
-        }
-        return false;
-      default:
-        return false;
+      }
+      return false;
+    default:
+      return false;
     }
   }
 
@@ -159,7 +160,7 @@ class CircuitBreaker {
   updateStateMetrics(connectionId) {
     const state = this.states.get(connectionId);
     const stateValue = state === STATES.CLOSED ? 0 : 
-                      state === STATES.HALF_OPEN ? 1 : 2;
+      state === STATES.HALF_OPEN ? 1 : 2;
     
     this.stateGauge.set({ connection_id: connectionId }, stateValue);
   }

@@ -1,0 +1,25 @@
+# These owners will be the default owners for everything in
+# the repo. Unless a later match takes precedence,
+# these users will be requested for review when someone 
+# opens a pull request.
+*       @project-maintainers
+
+# BLE core functionality
+/src/ble/           @ble-team-maintainers
+
+# MCP protocol implementation
+/src/mcp/           @protocol-team-maintainers
+
+# Configuration and utilities
+/src/config/        @core-team-maintainers
+/src/utils/         @core-team-maintainers
+
+# Test files
+/tests/             @qa-team-maintainers
+
+# Documentation
+/docs/              @docs-team-maintainers
+
+# CI/CD and deployment
+/.github/           @devops-team-maintainers
+/config/           @devops-team-maintainers

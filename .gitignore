@@ -12,6 +12,7 @@ yarn-error.log
 # Logs
 logs/
 *.log
+terraform-apply.log
 
 # Runtime data
 pids
@@ -41,4 +42,21 @@ coverage
 
 # Build output
 dist/
-build/ 
+build/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+secrets.tfvars
+tfplan
+.terraform.lock.hcl
+
+# AWS credentials
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx 

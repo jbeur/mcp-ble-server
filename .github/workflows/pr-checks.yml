@@ -1,0 +1,92 @@
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  label-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label PR based on changes
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            // Remove existing size labels
+            const sizeLabels = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
+            await Promise.all(sizeLabels.map(label => 
+              github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: label
+              }).catch(() => {})
+            ));
+
+            // Add size label based on changes
+            const changes = pr.additions + pr.deletions;
+            let sizeLabel;
+            if (changes <= 10) sizeLabel = 'size/XS';
+            else if (changes <= 30) sizeLabel = 'size/S';
+            else if (changes <= 100) sizeLabel = 'size/M';
+            else if (changes <= 500) sizeLabel = 'size/L';
+            else sizeLabel = 'size/XL';
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: [sizeLabel]
+            });
+
+            // Add type labels based on changed files
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const labels = new Set();
+            files.forEach(file => {
+              if (file.filename.startsWith('src/')) {
+                if (file.filename.includes('test')) labels.add('type/test');
+                else if (file.filename.includes('docs')) labels.add('type/docs');
+                else labels.add('type/code');
+              }
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: Array.from(labels)
+            });
+
+  check-pr-size:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR size
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const changes = pr.additions + pr.deletions;
+            if (changes > 1000) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `⚠️ Warning: This PR is quite large (${changes} changes). Consider breaking it down into smaller, more manageable PRs.`
+              });
+            } 

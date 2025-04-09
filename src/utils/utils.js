@@ -5,20 +5,20 @@
  * @returns {Object} The merged object
  */
 function deepMerge(target, source) {
-    if (!source) return target;
-    const output = { ...target };
+  if (!source) return target;
+  const output = { ...target };
 
-    Object.keys(source).forEach(key => {
-        if (source[key] instanceof Object && key in target) {
-            output[key] = deepMerge(target[key], source[key]);
-        } else {
-            output[key] = source[key];
-        }
-    });
+  Object.keys(source).forEach(key => {
+    if (source[key] instanceof Object && key in target) {
+      output[key] = deepMerge(target[key], source[key]);
+    } else {
+      output[key] = source[key];
+    }
+  });
 
-    return output;
+  return output;
 }
 
 module.exports = {
-    deepMerge
+  deepMerge
 }; 

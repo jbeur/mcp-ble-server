@@ -1,0 +1,55 @@
+name: Branch Protection Rules
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  branch-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch protection
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: context.ref.replace('refs/heads/', '')
+            });
+            
+            if (branch.protected) {
+              console.log(`Branch ${context.ref} is already protected`);
+            } else {
+              console.log(`Branch ${context.ref} needs protection rules`);
+            }
+
+  enforce-protection:
+    needs: branch-protection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce branch protection
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.repos.updateBranchProtection({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: context.ref.replace('refs/heads/', ''),
+              required_status_checks: {
+                strict: true,
+                contexts: ['ci', 'lint', 'test']
+              },
+              enforce_admins: true,
+              required_pull_request_reviews: {
+                required_approving_review_count: 1,
+                dismiss_stale_reviews: true,
+                require_code_owner_reviews: true
+              },
+              restrictions: null,
+              required_linear_history: true,
+              allow_force_pushes: false,
+              allow_deletions: false
+            }); 

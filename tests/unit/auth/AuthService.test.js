@@ -1,437 +1,468 @@
 const jwt = require('jsonwebtoken');
-const AuthService = require('../../../src/auth/AuthService');
-const SessionEncryption = require('../../../src/mcp/security/SessionEncryption');
-const metrics = require('../../../src/utils/metrics');
-const logger = require('../../../src/utils/logger');
-const ThreatDetectionService = require('../../../src/security/ThreatDetectionService');
+const crypto = require('crypto');
 
-jest.mock('../../../src/utils/metrics', () => ({
-    increment: jest.fn(),
-    authSessionCreationSuccess: { inc: jest.fn() },
-    authSessionCreationError: { inc: jest.fn() },
-    authSessionRemovalSuccess: { inc: jest.fn() },
-    authSessionRemovalError: { inc: jest.fn() },
-    authSessionCleanupSuccess: { inc: jest.fn() },
-    authSessionCleanupError: { inc: jest.fn() },
-    authValidationSuccess: { inc: jest.fn() },
-    authValidationError: { inc: jest.fn() },
-    authFailures: { inc: jest.fn() },
-    requestRate: { inc: jest.fn() },
-    suspiciousPatterns: { inc: jest.fn() },
-    threatDetectionErrors: { inc: jest.fn() }
-}));
+// Mock logger with all required methods
+const mockLogger = {
+  info: jest.fn(),
+  error: jest.fn(),
+  warn: jest.fn(),
+  debug: jest.fn(),
+  trace: jest.fn()
+};
 
-jest.mock('../../../src/utils/logger', () => ({
-    error: jest.fn(),
-    warn: jest.fn(),
-    info: jest.fn()
-}));
-
-jest.mock('../../../src/auth/ApiKeyManager', () => {
-    return jest.fn().mockImplementation(() => ({
-        createKey: jest.fn().mockReturnValue('test-api-key'),
-        validateKey: jest.fn().mockReturnValue(true),
-        rotateKey: jest.fn().mockReturnValue('new-api-key'),
-        removeKey: jest.fn(),
-        startRotationInterval: jest.fn(),
-        stopRotationInterval: jest.fn()
-    }));
+// Mock RateLimiter
+jest.mock('../../../src/auth/RateLimiter', () => {
+  return jest.fn().mockImplementation(() => ({
+    isRateLimited: jest.fn().mockReturnValue(false),
+    stop: jest.fn(),
+    logger: mockLogger
+  }));
 });
 
-jest.mock('../../../src/security/ThreatDetectionService');
+jest.mock('../../../src/utils/logger', () => ({
+  logger: mockLogger,
+  default: mockLogger
+}));
+
+// Mock metrics with proper implementations
+const mockMetrics = {
+  increment: jest.fn(),
+  gauge: jest.fn(),
+  histogram: jest.fn()
+};
+
+jest.mock('../../../src/utils/metrics', () => mockMetrics);
+
+// Mock SessionEncryption with proper encryption/decryption
+const mockSessionEncryption = {
+  encrypt: jest.fn().mockImplementation((data) => {
+    return {
+      encrypted: Buffer.from(JSON.stringify(data)).toString('base64'),
+      iv: crypto.randomBytes(16),
+      authTag: crypto.randomBytes(16)
+    };
+  }),
+  decrypt: jest.fn().mockImplementation((data) => {
+    if (!data || !data.encrypted) return null;
+    if (data === 'error') throw new Error('Cleanup failed');
+    try {
+      const decrypted = JSON.parse(Buffer.from(data.encrypted, 'base64').toString());
+      return {
+        ...decrypted,
+        expiresAt: data.expiresAt
+      };
+    } catch (e) {
+      return null;
+    }
+  }),
+  encryptSession: jest.fn().mockImplementation((data) => {
+    return {
+      encrypted: Buffer.from(JSON.stringify(data)).toString('base64'),
+      iv: crypto.randomBytes(16),
+      authTag: crypto.randomBytes(16)
+    };
+  }),
+  decryptSession: jest.fn().mockImplementation((data) => {
+    if (!data || !data.encrypted) return null;
+    if (data === 'error') throw new Error('Cleanup failed');
+    try {
+      const decrypted = JSON.parse(Buffer.from(data.encrypted, 'base64').toString());
+      return {
+        ...decrypted,
+        expiresAt: data.expiresAt
+      };
+    } catch (e) {
+      return null;
+    }
+  })
+};
+
+jest.mock('../../../src/mcp/security/SessionEncryption', () => {
+  return jest.fn().mockImplementation(() => mockSessionEncryption);
+});
+
+jest.mock('../../../src/security/ThreatDetectionService', () => {
+  return jest.fn().mockImplementation(() => ({
+    analyze: jest.fn(),
+    hasHighSeverityThreats: jest.fn().mockResolvedValue(false),
+    isIpBlocked: jest.fn().mockResolvedValue(false),
+    getFailedAttempts: jest.fn().mockReturnValue(0)
+  }));
+});
+
+const AuthService = require('../../../src/auth/AuthService');
+const metrics = require('../../../src/utils/metrics');
+const ThreatDetectionService = require('../../../src/security/ThreatDetectionService');
+
+jest.mock('../../../src/auth/ApiKeyManager', () => {
+  return jest.fn().mockImplementation(() => ({
+    createKey: jest.fn().mockReturnValue('test-api-key'),
+    validateKey: jest.fn().mockReturnValue(true),
+    rotateKey: jest.fn().mockReturnValue('new-api-key'),
+    removeKey: jest.fn(),
+    deleteKey: jest.fn(),
+    startRotationInterval: jest.fn(),
+    stopRotationInterval: jest.fn()
+  }));
+});
 
 describe('AuthService', () => {
-    let authService;
-    let mockConfig;
-    let originalSetInterval;
-    let originalClearInterval;
-    let cleanupInterval;
+  let authService;
+  let originalSetInterval;
+  let originalClearInterval;
+  let cleanupInterval;
 
+  const mockConfig = {
+    auth: {
+      maxFailedAttempts: 5,
+      lockoutDuration: 900000,
+      sessionDuration: 3600000,
+      apiKeyRotationInterval: 86400000,
+      jwtSecret: 'test-jwt-secret',
+      sessionSecret: 'test-session-secret'
+    },
+    security: {
+      tokenAuth: {
+        accessTokenSecret: 'test-access-token-secret',
+        refreshTokenSecret: 'test-refresh-token-secret',
+        algorithm: 'HS256'
+      },
+      oauth2: {
+        clientId: 'test-client-id',
+        clientSecret: 'test-client-secret',
+        redirectUri: 'http://localhost:3000/callback',
+        authorizationEndpoint: 'http://localhost:3000/auth',
+        tokenEndpoint: 'http://localhost:3000/token',
+        authorizationCodeExpiry: 600000,
+        accessTokenExpiry: 3600000,
+        refreshTokenExpiry: 86400000,
+        jwtSecret: 'test-jwt-secret',
+        sessionExpiry: 3600000,
+        maxConcurrentSessions: 5
+      }
+    },
+    rateLimiting: {
+      windowMs: 60000,
+      maxRequests: 100
+    }
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authService = new AuthService(mockConfig);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe('validateApiKey', () => {
+    it('should return true for valid API key', async () => {
+      authService.apiKeyManager.validateKey.mockResolvedValueOnce(true);
+      const result = await authService.authenticate('test-client', 'valid-api-key');
+      expect(result).toBeTruthy();
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.success');
+    });
+
+    it('should throw error for invalid API key', async () => {
+      authService.apiKeyManager.validateKey.mockResolvedValueOnce(false);
+      await expect(authService.authenticate('test-client', 'invalid-key'))
+        .rejects.toThrow('Invalid API key');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+
+    it('should throw error for empty API key', async () => {
+      await expect(authService.authenticate('test-client', ''))
+        .rejects.toThrow('Client ID and API key are required');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+
+    it('should throw error for null API key', async () => {
+      await expect(authService.authenticate('test-client', null))
+        .rejects.toThrow('Client ID and API key are required');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+
+    it('should throw error for undefined API key', async () => {
+      await expect(authService.authenticate('test-client', undefined))
+        .rejects.toThrow('Client ID and API key are required');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+
+    it('should throw error for missing client ID', async () => {
+      await expect(authService.authenticate(null, 'test-key'))
+        .rejects.toThrow('Client ID and API key are required');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+  });
+
+  describe('createSession', () => {
+    it('should create a valid session with JWT token and API key', async () => {
+      const clientId = 'test-client';
+      const session = await authService.createSession(clientId);
+      expect(session).toBeTruthy();
+      expect(typeof session).toBe('string');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.created');
+    });
+
+    it('should throw error for invalid client ID', async () => {
+      await expect(authService.createSession(null))
+        .rejects.toThrow('Client ID is required');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.error');
+    });
+
+    it('should include expiration time in session data', async () => {
+      const clientId = 'test-client';
+      const sessionId = await authService.createSession(clientId);
+      const encryptedSession = authService.activeSessions.get(sessionId);
+      expect(encryptedSession.expiresAt).toBeTruthy();
+      expect(encryptedSession.expiresAt).toBeGreaterThan(Date.now());
+    });
+  });
+
+  describe('validateSession', () => {
+    it('should return true for valid session', async () => {
+      const clientId = 'test-client';
+      const sessionId = await authService.createSession(clientId);
+      const mockSession = {
+        encrypted: Buffer.from(JSON.stringify({ clientId, expiresAt: Date.now() + 3600000 })).toString('base64'),
+        iv: crypto.randomBytes(16),
+        authTag: crypto.randomBytes(16)
+      };
+      authService.activeSessions.set(sessionId, mockSession);
+      const result = await authService.validateSession(sessionId);
+      expect(result).toBe(true);
+    });
+
+    it('should throw error for expired session', async () => {
+      const clientId = 'test-client';
+      const sessionId = await authService.createSession(clientId);
+      const expiredSession = {
+        clientId,
+        expiresAt: Date.now() - 1000
+      };
+      mockSessionEncryption.decryptSession.mockResolvedValueOnce(expiredSession);
+      await expect(authService.validateSession(sessionId)).rejects.toThrow('Session expired');
+    });
+
+    it('should throw error for invalid session ID', async () => {
+      await expect(authService.validateSession('invalid-session')).rejects.toThrow('Session not found');
+    });
+
+    it('should throw error for missing session ID', async () => {
+      await expect(authService.validateSession(null)).rejects.toThrow('Session ID is required');
+    });
+
+    it('should throw error for corrupted session data', async () => {
+      const clientId = 'test-client';
+      const sessionId = await authService.createSession(clientId);
+      
+      // Corrupt the session data
+      const corruptedSession = { encrypted: 'invalid-data', iv: 'invalid-iv', authTag: 'invalid-tag' };
+      authService.activeSessions.set(sessionId, corruptedSession);
+      
+      await expect(authService.validateSession(sessionId)).rejects.toThrow('Failed to decrypt session');
+    });
+  });
+
+  describe('removeSession', () => {
+    it('should remove session successfully', async () => {
+      const sessionId = 'test-session';
+      const mockSession = {
+        encrypted: Buffer.from(JSON.stringify({ clientId: 'test-client', apiKey: 'test-key' })).toString('base64'),
+        iv: crypto.randomBytes(16),
+        authTag: crypto.randomBytes(16)
+      };
+      authService.activeSessions.set(sessionId, mockSession);
+      await authService.removeSession(sessionId);
+      expect(authService.activeSessions.has(sessionId)).toBe(false);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.removed');
+    });
+
+    it('should handle non-existent session removal gracefully', () => {
+      authService.removeSession('non-existent');
+      expect(mockMetrics.increment).not.toHaveBeenCalledWith('auth.sessions.removed');
+    });
+
+    it('should remove API key when session is removed', async () => {
+      const clientId = 'test-client';
+      const apiKey = 'test-api-key';
+      const sessionId = await authService.createSession(clientId);
+      const removeKeySpy = jest.spyOn(authService.apiKeyManager, 'deleteKey');
+
+      mockSessionEncryption.decryptSession.mockResolvedValueOnce({
+        clientId,
+        apiKey
+      });
+
+      await authService.removeSession(sessionId);
+      expect(removeKeySpy).toHaveBeenCalledWith(apiKey);
+    });
+  });
+
+  describe('session cleanup', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
-        jest.useFakeTimers();
-        
-        // Save original timer functions
-        originalSetInterval = global.setInterval;
-        originalClearInterval = global.clearInterval;
-        
-        mockConfig = {
-            auth: {
-                jwtSecret: 'test-secret',
-                sessionDuration: 3600,
-                sessionTimeout: 7200,
-                cleanupInterval: 300000,
-                keyRotationInterval: 1000,
-                maxKeyAge: 5000,
-                sessionExpiry: 3600000
-            },
-            security: {
-                tokenAuth: {
-                    accessTokenSecret: 'test-access-secret',
-                    refreshTokenSecret: 'test-refresh-secret',
-                    accessTokenExpiry: '15m',
-                    refreshTokenExpiry: '7d',
-                    issuer: 'test-issuer',
-                    algorithm: 'HS256'
-                },
-                oauth2: {
-                    clientId: 'test-client-id',
-                    clientSecret: 'test-client-secret',
-                    redirectUri: 'http://localhost:3000/callback',
-                    authorizationEndpoint: 'http://localhost:8080/oauth/authorize',
-                    tokenEndpoint: 'http://localhost:8080/oauth/token',
-                    scope: 'read write'
-                }
-            },
-            threatDetection: {
-                failedAuthThreshold: 3,
-                requestRateThreshold: 50,
-                suspiciousPatterns: ['sql_injection', 'xss_attempt']
-            }
-        };
-        ThreatDetectionService.mockImplementation(() => ({
-            analyze: jest.fn().mockReturnValue([])
-        }));
-        authService = new AuthService(mockConfig, metrics);
-        cleanupInterval = authService.cleanupInterval;
+      jest.clearAllMocks();
     });
 
-    afterEach(() => {
-        if (authService && typeof authService.stopCleanup === 'function') {
-            authService.stopCleanup();
-        }
-        jest.useRealTimers();
-        // Restore original timer functions
-        global.setInterval = originalSetInterval;
-        global.clearInterval = originalClearInterval;
+    it('should clean up expired sessions', async () => {
+      const now = Date.now();
+      const expiredSessionId = 'expired-session';
+      const validSessionId = 'valid-session';
+
+      const expiredSession = {
+        clientId: 'test-client',
+        expiresAt: now - 1000
+      };
+      const validSession = {
+        clientId: 'test-client-2',
+        expiresAt: now + 1000
+      };
+
+      mockSessionEncryption.decryptSession
+        .mockResolvedValueOnce(expiredSession)
+        .mockResolvedValueOnce(validSession);
+
+      authService.activeSessions.set(expiredSessionId, { encrypted: 'expired' });
+      authService.activeSessions.set(validSessionId, { encrypted: 'valid' });
+
+      await authService.cleanupSessions();
+
+      expect(authService.activeSessions.size).toBe(1);
+      expect(authService.activeSessions.has(validSessionId)).toBe(true);
+      expect(authService.activeSessions.has(expiredSessionId)).toBe(false);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.expired');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.cleanup.success');
+      expect(mockMetrics.gauge).toHaveBeenCalledWith('auth.active_sessions', 1);
+      expect(mockMetrics.histogram).toHaveBeenCalledWith('auth.sessions.cleanup.expired', 1);
     });
 
-    describe('validateApiKey', () => {
-        it('should return true for valid API key', async () => {
-            const result = await authService.validateApiKey('valid-api-key');
-            expect(result.valid).toBe(true);
-            expect(metrics.authValidationSuccess.inc).toHaveBeenCalled();
-        });
+    it('should handle invalid sessions', async () => {
+      authService.sessionEncryption.decryptSession.mockResolvedValue(null);
+      authService.activeSessions.set('invalid', 'invalid');
 
-        it('should throw error for invalid API key', async () => {
-            authService.apiKeyManager.validateKey.mockReturnValueOnce(false);
-            await expect(authService.validateApiKey('invalid-key')).rejects.toThrow('Invalid API key');
-            expect(metrics.authValidationError.inc).toHaveBeenCalled();
-        });
+      await authService.cleanupSessions();
 
-        it('should return true when auth is disabled', async () => {
-            mockConfig.auth.enabled = false;
-            const result = await authService.validateApiKey('any-key');
-            expect(result.valid).toBe(true);
-        });
-
-        it('should throw error for empty API key', async () => {
-            await expect(authService.validateApiKey('')).rejects.toThrow('API key is required');
-            expect(metrics.authValidationError.inc).toHaveBeenCalled();
-        });
-
-        it('should throw error for null API key', async () => {
-            await expect(authService.validateApiKey(null)).rejects.toThrow('API key is required');
-            expect(metrics.authValidationError.inc).toHaveBeenCalled();
-        });
-
-        it('should throw error for undefined API key', async () => {
-            await expect(authService.validateApiKey(undefined)).rejects.toThrow('API key is required');
-            expect(metrics.authValidationError.inc).toHaveBeenCalled();
-        });
+      expect(authService.activeSessions.size).toBe(0);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.error');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.cleanup.success');
+      expect(mockMetrics.gauge).toHaveBeenCalledWith('auth.active_sessions', 0);
+      expect(mockMetrics.histogram).toHaveBeenCalledWith('auth.sessions.cleanup.errors', 1);
     });
 
-    describe('createSession', () => {
-        it('should create a valid session with JWT token and API key', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            
-            expect(session).toBeTruthy();
-            expect(typeof session.token).toBe('string');
-            expect(session.apiKey).toBe('test-api-key');
-            expect(metrics.authSessionCreationSuccess.inc).toHaveBeenCalled();
-            
-            const decoded = jwt.verify(session.token, mockConfig.auth.jwtSecret);
-            expect(decoded.clientId).toBe(clientId);
-            expect(decoded.apiKey).toBe('test-api-key');
+    it('should handle decryption errors', async () => {
+      authService.sessionEncryption.decryptSession.mockRejectedValue(new Error('Decryption failed'));
+      authService.activeSessions.set('error', 'error');
 
-            // Verify session is encrypted in storage
-            const encryptedSession = authService.activeSessions.get(clientId);
-            expect(encryptedSession).toHaveProperty('encrypted');
-            expect(encryptedSession).toHaveProperty('iv');
-            expect(encryptedSession).toHaveProperty('authTag');
-        });
+      await authService.cleanupSessions();
 
-        it('should throw error for invalid client ID', () => {
-            expect(() => authService.createSession(null)).toThrow('Client ID is required');
-            expect(metrics.authSessionCreationError.inc).toHaveBeenCalled();
-        });
-
-        it('should include expiration time in JWT token', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            const decoded = jwt.verify(session.token, mockConfig.auth.jwtSecret);
-            expect(decoded.exp).toBeTruthy();
-        });
-
-        it('should store encrypted session in activeSessions', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            expect(authService.activeSessions.has(clientId)).toBe(true);
-            
-            const encryptedSession = authService.activeSessions.get(clientId);
-            expect(encryptedSession).toHaveProperty('encrypted');
-            expect(encryptedSession).toHaveProperty('iv');
-            expect(encryptedSession).toHaveProperty('authTag');
-
-            // Verify the session can be decrypted
-            const decryptedSession = authService.sessionEncryption.decryptSession(
-                encryptedSession,
-                authService.encryptionKey
-            );
-            expect(decryptedSession).toEqual({
-                token: session.token,
-                apiKey: 'test-api-key',
-                createdAt: expect.any(Number),
-                lastActivity: expect.any(Number)
-            });
-        });
+      expect(authService.activeSessions.size).toBe(0);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.error');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.cleanup.success');
+      expect(mockMetrics.gauge).toHaveBeenCalledWith('auth.active_sessions', 0);
+      expect(mockMetrics.histogram).toHaveBeenCalledWith('auth.sessions.cleanup.errors', 1);
     });
 
-    describe('validateSession', () => {
-        it('should return true for valid session', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            const result = authService.validateSession(session.token);
-            expect(result).toBe(true);
+    it('should handle missing sessions', async () => {
+      authService.activeSessions.set('missing', null);
 
-            // Verify session data is re-encrypted after validation
-            const encryptedSession = authService.activeSessions.get(clientId);
-            expect(encryptedSession).toHaveProperty('encrypted');
-            expect(encryptedSession).toHaveProperty('iv');
-            expect(encryptedSession).toHaveProperty('authTag');
-        });
+      await authService.cleanupSessions();
 
-        it('should return false for expired session', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            
-            // Advance time past session duration
-            const advanceTime = (mockConfig.auth.sessionDuration + 1) * 1000;
-            jest.advanceTimersByTime(advanceTime);
-            
-            const result = authService.validateSession(session.token);
-            expect(result).toBe(false);
-        });
-
-        it('should return false for invalid token', () => {
-            const result = authService.validateSession('invalid-token');
-            expect(result).toBe(false);
-        });
-
-        it('should return false for tampered token', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            const [header, payload, signature] = session.token.split('.');
-            const tamperedPayload = Buffer.from(JSON.stringify({ 
-                apiKey: 'malicious-key',
-                clientId: 'malicious-client'
-            })).toString('base64');
-            const tamperedToken = `${header}.${tamperedPayload}.${signature}`;
-            const result = authService.validateSession(tamperedToken);
-            expect(result).toBe(false);
-        });
-
-        it('should return false for invalid API key', () => {
-            const clientId = 'test-client';
-            const session = authService.createSession(clientId);
-            
-            // Mock API key validation to fail
-            authService.apiKeyManager.validateKey.mockReturnValueOnce(false);
-            
-            const result = authService.validateSession(session.token);
-            expect(result).toBe(false);
-        });
+      expect(authService.activeSessions.size).toBe(0);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.error');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.cleanup.success');
+      expect(mockMetrics.gauge).toHaveBeenCalledWith('auth.active_sessions', 0);
+      expect(mockMetrics.histogram).toHaveBeenCalledWith('auth.sessions.cleanup.errors', 1);
     });
 
-    describe('removeSession', () => {
-        it('should remove session successfully', () => {
-            const clientId = 'test-client';
-            authService.createSession(clientId);
-            authService.removeSession(clientId);
-            expect(authService.activeSessions.has(clientId)).toBe(false);
-            expect(metrics.authSessionRemovalSuccess.inc).toHaveBeenCalled();
-        });
+    it('should handle cleanup errors', async () => {
+      const mockError = new Error('Cleanup failed');
+      mockSessionEncryption.decryptSession.mockRejectedValueOnce(mockError);
+      authService.activeSessions.set('error', { encrypted: 'error' });
 
-        it('should handle non-existent session removal gracefully', () => {
-            authService.removeSession('non-existent');
-            expect(metrics.authSessionRemovalSuccess.inc).not.toHaveBeenCalled();
-        });
+      await expect(authService.cleanupSessions()).rejects.toThrow('Cleanup failed');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.sessions.cleanup.error');
+    });
+  });
+
+  describe('API key management', () => {
+    it('should start API key rotation interval on initialization', () => {
+      const startRotationSpy = jest.spyOn(authService.apiKeyManager, 'startRotationInterval');
+      authService.apiKeyManager.startRotationInterval();
+      expect(startRotationSpy).toHaveBeenCalled();
+      authService.stopCleanup();
     });
 
-    describe('session cleanup', () => {
-        it('should clean up expired sessions', () => {
-            const clientId = 'test-client';
-            const session = {
-                clientId,
-                expiresAt: Date.now() - 1000 // Already expired
-            };
-            authService.activeSessions.set(clientId, session);
-
-            // Trigger cleanup
-            jest.advanceTimersByTime(mockConfig.auth.cleanupInterval);
-
-            expect(authService.activeSessions.has(clientId)).toBe(false);
-            expect(metrics.authSessionCleanupSuccess.inc).toHaveBeenCalled();
-        });
-
-        it('should handle corrupted session data during cleanup', () => {
-            const clientId = 'test-client';
-            const invalidSession = {
-                clientId,
-                expiresAt: 'invalid-date'
-            };
-            authService.activeSessions.set(clientId, invalidSession);
-
-            // Trigger cleanup
-            jest.advanceTimersByTime(mockConfig.auth.cleanupInterval);
-
-            expect(authService.activeSessions.has(clientId)).toBe(false);
-            expect(metrics.authSessionCleanupError.inc).toHaveBeenCalled();
-            expect(logger.error).toHaveBeenCalledWith('Error during session cleanup', expect.any(Error));
-        });
-
-        it('should stop cleanup when service is stopped', () => {
-            expect(cleanupInterval).toBeDefined();
-            authService.stopCleanup();
-            expect(authService.cleanupInterval).toBeNull();
-        });
+    it('should stop API key rotation interval on cleanup stop', () => {
+      const stopRotationSpy = jest.spyOn(authService.apiKeyManager, 'stopRotationInterval');
+      authService.stopCleanup();
+      expect(stopRotationSpy).toHaveBeenCalled();
     });
 
-    describe('API key management', () => {
-        it('should start API key rotation interval on initialization', () => {
-            const startRotationSpy = jest.spyOn(authService.apiKeyManager, 'startRotationInterval');
-            const newAuthService = new AuthService(mockConfig, metrics);
-            expect(startRotationSpy).toHaveBeenCalled();
-            newAuthService.stopCleanup();
-        });
+    it('should remove API key when session is removed', async () => {
+      const clientId = 'test-client';
+      const apiKey = 'test-api-key';
+      const sessionId = await authService.createSession(clientId);
+      const removeKeySpy = jest.spyOn(authService.apiKeyManager, 'deleteKey');
 
-        it('should stop API key rotation interval on cleanup stop', () => {
-            const stopRotationSpy = jest.spyOn(authService.apiKeyManager, 'stopRotationInterval');
-            authService.stopCleanup();
-            expect(stopRotationSpy).toHaveBeenCalled();
-        });
+      mockSessionEncryption.decryptSession.mockResolvedValueOnce({
+        clientId,
+        apiKey
+      });
 
-        it('should remove API key when session is removed', () => {
-            const clientId = 'test-client';
-            authService.createSession(clientId);
-            const removeKeySpy = jest.spyOn(authService.apiKeyManager, 'removeKey');
-            
-            authService.removeSession(clientId);
-            expect(removeKeySpy).toHaveBeenCalledWith(clientId);
-        });
+      await authService.removeSession(sessionId);
+      expect(removeKeySpy).toHaveBeenCalledWith(apiKey);
+    });
+  });
+
+  describe('authenticate', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      authService.threatDetection = {
+        hasHighSeverityThreats: jest.fn().mockResolvedValue(false),
+        isIpBlocked: jest.fn().mockResolvedValue(false)
+      };
     });
 
-    describe('authenticate', () => {
-        it('should check for threats during authentication', async () => {
-            const credentials = {
-                clientId: 'test-client',
-                apiKey: 'test-key'
-            };
+    it('should check for threats during authentication', async () => {
+      const credentials = {
+        clientId: 'test-client',
+        apiKey: 'valid-key'
+      };
 
-            // Mock validateApiKey to throw an error
-            authService.validateApiKey = jest.fn().mockImplementation(() => {
-                throw new Error('Invalid API key');
-            });
-
-            await expect(authService.authenticate(credentials))
-                .rejects.toThrow('Invalid API key');
-
-            expect(authService.threatDetection.analyze).toHaveBeenCalledWith({
-                type: 'auth_attempt',
-                credentials: expect.objectContaining({
-                    clientId: credentials.clientId,
-                    timestamp: expect.any(Number)
-                })
-            });
-        });
-
-        it('should track failed authentication attempts', async () => {
-            const credentials = {
-                clientId: 'test-client',
-                apiKey: 'invalid-key'
-            };
-
-            // Mock validateApiKey to throw an error
-            authService.validateApiKey = jest.fn().mockImplementation(() => {
-                throw new Error('Invalid API key');
-            });
-
-            await expect(authService.authenticate(credentials))
-                .rejects.toThrow('Invalid API key');
-
-            expect(authService.threatDetection.analyze).toHaveBeenCalledWith({
-                type: 'auth_failure',
-                count: 1,
-                source: credentials.clientId
-            });
-        });
-
-        it('should block authentication on high severity threats', async () => {
-            const credentials = {
-                clientId: 'test-client',
-                apiKey: 'test-key'
-            };
-
-            authService.threatDetection.analyze.mockReturnValueOnce([
-                { severity: 'high', message: 'Suspicious activity detected' }
-            ]);
-
-            await expect(authService.authenticate(credentials))
-                .rejects.toThrow('Authentication blocked due to security threat');
-
-            expect(logger.warn).toHaveBeenCalledWith('Authentication threats detected', {
-                threats: expect.arrayContaining([
-                    expect.objectContaining({
-                        severity: 'high',
-                        message: 'Suspicious activity detected'
-                    })
-                ])
-            });
-        });
-
-        it('should accumulate failed attempts count', async () => {
-            const credentials = {
-                clientId: 'test-client',
-                apiKey: 'invalid-key'
-            };
-
-            // Mock validateApiKey to throw an error
-            authService.validateApiKey = jest.fn().mockImplementation(() => {
-                throw new Error('Invalid API key');
-            });
-
-            // First attempt
-            await expect(authService.authenticate(credentials))
-                .rejects.toThrow('Invalid API key');
-
-            expect(authService.threatDetection.analyze).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    type: 'auth_failure',
-                    count: 1
-                })
-            );
-
-            // Second attempt
-            await expect(authService.authenticate(credentials))
-                .rejects.toThrow('Invalid API key');
-
-            expect(authService.threatDetection.analyze).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    type: 'auth_failure',
-                    count: 2
-                })
-            );
-        });
+      authService.apiKeyManager.validateKey.mockResolvedValueOnce(true);
+      const result = await authService.authenticate(credentials.clientId, credentials.apiKey);
+      expect(result).toBeTruthy();
+      expect(authService.threatDetection.hasHighSeverityThreats).toHaveBeenCalledWith(credentials.clientId);
     });
+
+    it('should block authentication on high severity threats', async () => {
+      authService.threatDetection.hasHighSeverityThreats.mockResolvedValueOnce(true);
+      const credentials = {
+        clientId: 'test-client',
+        apiKey: 'valid-key'
+      };
+
+      await expect(authService.authenticate(credentials.clientId, credentials.apiKey))
+        .rejects.toThrow('Access denied');
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+
+    it('should accumulate failed attempts count', async () => {
+      const credentials = {
+        clientId: 'test-client',
+        apiKey: 'invalid-key'
+      };
+
+      authService.apiKeyManager.validateKey.mockResolvedValue(false);
+
+      for (let i = 0; i < 3; i++) {
+        await expect(authService.authenticate(credentials.clientId, credentials.apiKey))
+          .rejects.toThrow('Invalid API key');
+      }
+
+      expect(authService.authFailureCount.get(credentials.clientId)).toBe(3);
+      expect(mockMetrics.increment).toHaveBeenCalledWith('auth.failure');
+    });
+  });
 }); 

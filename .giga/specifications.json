@@ -1,0 +1,22 @@
+[
+  {
+    "fileName": "main-overview.mdc",
+    "description": "Complete system overview including the BLE device management architecture, predictive scaling system, and security components with their interactions"
+  },
+  {
+    "fileName": "predictive-algorithms.mdc",
+    "description": "Detailed documentation of core predictive algorithms including load scaling, resource forecasting, and trend analysis with implementation details and mathematical models"
+  },
+  {
+    "fileName": "ble-protocol.mdc",
+    "description": "Comprehensive documentation of the BLE protocol implementation including connection management, characteristic operations, power management, and device discovery optimizations"
+  },
+  {
+    "fileName": "security-model.mdc",
+    "description": "Detailed documentation of the security implementation including authentication flows, encryption protocols, threat detection algorithms, and vulnerability scanning methodology"
+  },
+  {
+    "fileName": "data-flow.mdc",
+    "description": "Documentation of system data flows including message control protocol (MCP), batching systems, and inter-component communication patterns"
+  }
+]

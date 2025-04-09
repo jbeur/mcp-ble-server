@@ -59,157 +59,157 @@ const ERROR_CODES = {
  * Message Validators
  */
 const validateStartScan = (params) => {
-    if (!params.duration || typeof params.duration !== 'number' || params.duration <= 0) {
-        throw new Error('Duration must be a positive number');
+  if (!params.duration || typeof params.duration !== 'number' || params.duration <= 0) {
+    throw new Error('Duration must be a positive number');
+  }
+
+  if (params.filters) {
+    if (typeof params.filters !== 'object') {
+      throw new Error('Filters must be an object');
     }
 
-    if (params.filters) {
-        if (typeof params.filters !== 'object') {
-            throw new Error('Filters must be an object');
-        }
-
-        const validFilters = ['name', 'services'];
-        const hasValidFilter = Object.keys(params.filters).some(key => validFilters.includes(key));
-        if (!hasValidFilter) {
-            throw new Error('Invalid filter criteria');
-        }
-
-        if (params.filters.services && !Array.isArray(params.filters.services)) {
-            throw new Error('Invalid service UUIDs');
-        }
+    const validFilters = ['name', 'services'];
+    const hasValidFilter = Object.keys(params.filters).some(key => validFilters.includes(key));
+    if (!hasValidFilter) {
+      throw new Error('Invalid filter criteria');
     }
+
+    if (params.filters.services && !Array.isArray(params.filters.services)) {
+      throw new Error('Invalid service UUIDs');
+    }
+  }
 };
 
 const validateConnectDevice = (params) => {
-    if (!params.deviceId || typeof params.deviceId !== 'string') {
-        throw new Error('Device ID is required and must be a string');
-    }
+  if (!params.deviceId || typeof params.deviceId !== 'string') {
+    throw new Error('Device ID is required and must be a string');
+  }
 };
 
 const validateCharacteristicOperation = (params) => {
-    if (!params.deviceId || typeof params.deviceId !== 'string') {
-        throw new Error('Device ID is required and must be a string');
-    }
-    if (!params.serviceUuid || typeof params.serviceUuid !== 'string') {
-        throw new Error('Service UUID is required and must be a string');
-    }
-    if (!params.characteristicUuid || typeof params.characteristicUuid !== 'string') {
-        throw new Error('Characteristic UUID is required and must be a string');
-    }
+  if (!params.deviceId || typeof params.deviceId !== 'string') {
+    throw new Error('Device ID is required and must be a string');
+  }
+  if (!params.serviceUuid || typeof params.serviceUuid !== 'string') {
+    throw new Error('Service UUID is required and must be a string');
+  }
+  if (!params.characteristicUuid || typeof params.characteristicUuid !== 'string') {
+    throw new Error('Characteristic UUID is required and must be a string');
+  }
 };
 
 const validateWriteCharacteristic = (params) => {
-    validateCharacteristicOperation(params);
-    if (!params.value || typeof params.value !== 'string') {
-        throw new Error('Value is required and must be a base64 encoded string');
-    }
+  validateCharacteristicOperation(params);
+  if (!params.value || typeof params.value !== 'string') {
+    throw new Error('Value is required and must be a base64 encoded string');
+  }
     
-    // Validate base64 format
-    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-    if (!base64Regex.test(params.value)) {
-        throw new Error('Value is required and must be a base64 encoded string');
-    }
+  // Validate base64 format
+  const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+  if (!base64Regex.test(params.value)) {
+    throw new Error('Value is required and must be a base64 encoded string');
+  }
 };
 
 /**
  * Message Builders
  */
 const MessageBuilder = {
-    /**
+  /**
      * Build a connection acknowledgment message
      */
-    buildConnectionAck(clientId) {
-        return {
-            type: MESSAGE_TYPES.CONNECTION_ACK,
-            data: { clientId },
-            timestamp: Date.now()
-        };
-    },
+  buildConnectionAck(clientId) {
+    return {
+      type: MESSAGE_TYPES.CONNECTION_ACK,
+      data: { clientId },
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build an authenticated message
      */
-    buildAuthenticated(token) {
-        return {
-            type: MESSAGE_TYPES.AUTHENTICATED,
-            data: { token },
-            timestamp: Date.now()
-        };
-    },
+  buildAuthenticated(token) {
+    return {
+      type: MESSAGE_TYPES.AUTHENTICATED,
+      data: { token },
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build a session validation response message
      */
-    buildSessionValidation(isValid) {
-        return {
-            type: MESSAGE_TYPES.SESSION_VALID,
-            data: { valid: isValid },
-            timestamp: Date.now()
-        };
-    },
+  buildSessionValidation(isValid) {
+    return {
+      type: MESSAGE_TYPES.SESSION_VALID,
+      data: { valid: isValid },
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build a device found message
      */
-    buildDeviceFound(device) {
-        return {
-            type: MESSAGE_TYPES.DEVICE_FOUND,
-            device: {
-                id: device.id,
-                name: device.name,
-                address: device.address,
-                rssi: device.rssi,
-                manufacturerData: device.manufacturerData,
-                serviceUuids: device.serviceUuids
-            },
-            timestamp: Date.now()
-        };
-    },
+  buildDeviceFound(device) {
+    return {
+      type: MESSAGE_TYPES.DEVICE_FOUND,
+      device: {
+        id: device.id,
+        name: device.name,
+        address: device.address,
+        rssi: device.rssi,
+        manufacturerData: device.manufacturerData,
+        serviceUuids: device.serviceUuids
+      },
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build a device connected message
      */
-    buildDeviceConnected(deviceId) {
-        return {
-            type: MESSAGE_TYPES.DEVICE_CONNECTED,
-            deviceId,
-            timestamp: Date.now()
-        };
-    },
+  buildDeviceConnected(deviceId) {
+    return {
+      type: MESSAGE_TYPES.DEVICE_CONNECTED,
+      deviceId,
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build a characteristic value message
      */
-    buildCharacteristicValue(params) {
-        return {
-            type: MESSAGE_TYPES.CHARACTERISTIC_VALUE,
-            deviceId: params.deviceId,
-            serviceUuid: params.serviceUuid,
-            characteristicUuid: params.characteristicUuid,
-            value: params.value,
-            timestamp: Date.now()
-        };
-    },
+  buildCharacteristicValue(params) {
+    return {
+      type: MESSAGE_TYPES.CHARACTERISTIC_VALUE,
+      deviceId: params.deviceId,
+      serviceUuid: params.serviceUuid,
+      characteristicUuid: params.characteristicUuid,
+      value: params.value,
+      timestamp: Date.now()
+    };
+  },
 
-    /**
+  /**
      * Build an error message
      */
-    buildError(code, message = '') {
-        return {
-            type: MESSAGE_TYPES.ERROR,
-            code,
-            message,
-            timestamp: Date.now()
-        };
-    }
+  buildError(code, message = '') {
+    return {
+      type: MESSAGE_TYPES.ERROR,
+      code,
+      message,
+      timestamp: Date.now()
+    };
+  }
 };
 
 module.exports = {
-    MESSAGE_TYPES,
-    ERROR_CODES,
-    validateStartScan,
-    validateConnectDevice,
-    validateCharacteristicOperation,
-    validateWriteCharacteristic,
-    MessageBuilder
+  MESSAGE_TYPES,
+  ERROR_CODES,
+  validateStartScan,
+  validateConnectDevice,
+  validateCharacteristicOperation,
+  validateWriteCharacteristic,
+  MessageBuilder
 }; 

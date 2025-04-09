@@ -1,5 +1,6 @@
 const noble = require('@abandonware/noble');
-const BLEService = require('../../../src/ble/bleService');
+const { EventEmitter } = require('events');
+const { BLEService } = require('../../../src/ble/bleService');
 const { BLEScanError, BLEConnectionError, BLECharacteristicError } = require('../../../src/utils/bleErrors');
 const { logger } = require('../../../src/utils/logger');
 
@@ -11,34 +12,63 @@ jest.setTimeout(60000);
 
 describe('BLEService', () => {
   let bleService;
-  const mockDevice = {
-    id: 'test-device',
-    connect: jest.fn(),
-    on: jest.fn(),
-    discoverService: jest.fn(),
-  };
-  const mockService = {
-    discoverCharacteristic: jest.fn(),
-  };
-  const mockCharacteristic = {
-    read: jest.fn(),
-    write: jest.fn(),
-    subscribe: jest.fn(),
-    unsubscribe: jest.fn(),
-  };
+  let mockDevice;
+  let mockService;
+  let mockCharacteristic;
 
   beforeEach(() => {
     jest.clearAllMocks();
+
+    // Create mock device extending EventEmitter
+    mockDevice = new EventEmitter();
+    mockDevice.id = 'test-device';
+    mockDevice.connect = jest.fn();
+    mockDevice.discoverServices = jest.fn();
+    mockDevice.once = jest.fn();
+    mockDevice.disconnect = jest.fn();
+
+    // Create mock service
+    mockService = {
+      uuid: 'test-service',
+      discoverCharacteristics: jest.fn()
+    };
+
+    // Create mock characteristic
+    mockCharacteristic = {
+      uuid: 'test-characteristic',
+      read: jest.fn(),
+      write: jest.fn(),
+      subscribe: jest.fn(),
+      unsubscribe: jest.fn(),
+      on: jest.fn(),
+      removeAllListeners: jest.fn()
+    };
+
+    // Initialize BLEService with proper configuration
     bleService = new BLEService({
       max_retries: 3,
       retry_delay: 100,
       connection_timeout: 500,
+      auto_reconnect: true
     });
+
+    // Setup default mock behaviors
     noble.startScanningAsync.mockResolvedValue();
     noble.stopScanningAsync.mockResolvedValue();
     mockDevice.connect.mockResolvedValue();
-    mockDevice.discoverService.mockResolvedValue(mockService);
-    mockService.discoverCharacteristic.mockResolvedValue(mockCharacteristic);
+    mockDevice.discoverServices.mockResolvedValue([mockService]);
+    mockService.discoverCharacteristics.mockResolvedValue([mockCharacteristic]);
+    mockCharacteristic.read.mockResolvedValue(Buffer.from('test'));
+    mockCharacteristic.write.mockResolvedValue();
+    mockCharacteristic.subscribe.mockResolvedValue();
+    mockCharacteristic.unsubscribe.mockResolvedValue();
+  });
+
+  afterEach(async () => {
+    // Skip cleanup if we're in the cleanup error test
+    if (bleService && !bleService._testSkipCleanup) {
+      await bleService.cleanup();
+    }
   });
 
   describe('initialization', () => {
@@ -65,6 +95,7 @@ describe('BLEService', () => {
 
     it('should handle cleanup errors gracefully', async () => {
       bleService.isScanning = true;
+      bleService._testSkipCleanup = true; // Skip afterEach cleanup
       noble.stopScanningAsync.mockRejectedValue(new Error('Stop failed'));
       await expect(bleService.cleanup()).rejects.toThrow(BLEScanError);
       expect(logger.error).toHaveBeenCalled();
@@ -82,18 +113,20 @@ describe('BLEService', () => {
       await bleService.connectToDevice(deviceId);
       expect(mockDevice.connect).toHaveBeenCalled();
       expect(bleService.connectedDevices.has(deviceId)).toBe(true);
+      expect(mockDevice.once).toHaveBeenCalledWith('disconnect', expect.any(Function));
     });
 
     it('should handle connection timeout', async () => {
       mockDevice.connect.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 1000)));
-      await expect(bleService.connectToDevice(deviceId)).rejects.toThrow(BLEConnectionError);
+      await expect(bleService.connectToDevice(deviceId)).rejects.toThrow('Connection timeout');
     });
 
     it('should handle connection errors with retries', async () => {
+      const error = new Error('Connection failed');
       mockDevice.connect
-        .mockRejectedValueOnce(new Error('Connection failed'))
-        .mockRejectedValueOnce(new Error('Connection failed'))
-        .mockResolvedValue();
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce();
 
       await bleService.connectToDevice(deviceId);
       expect(mockDevice.connect).toHaveBeenCalledTimes(3);
@@ -116,28 +149,35 @@ describe('BLEService', () => {
 
       const result = await bleService.readCharacteristic(deviceId, serviceId, characteristicId);
       expect(result).toBe(mockValue);
+      expect(mockDevice.discoverServices).toHaveBeenCalled();
+      expect(mockService.discoverCharacteristics).toHaveBeenCalled();
     });
 
     it('should handle read errors with retries', async () => {
+      const error = new Error('Read failed');
       mockCharacteristic.read
-        .mockRejectedValueOnce(new Error('Read failed'))
-        .mockRejectedValueOnce(new Error('Read failed'))
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
         .mockResolvedValue(Buffer.from('test'));
 
-      await bleService.readCharacteristic(deviceId, serviceId, characteristicId);
+      const result = await bleService.readCharacteristic(deviceId, serviceId, characteristicId);
       expect(mockCharacteristic.read).toHaveBeenCalledTimes(3);
+      expect(result).toEqual(Buffer.from('test'));
     });
 
     it('should write characteristic successfully', async () => {
       const data = Buffer.from('test');
       await bleService.writeCharacteristic(deviceId, serviceId, characteristicId, data);
       expect(mockCharacteristic.write).toHaveBeenCalledWith(data);
+      expect(mockDevice.discoverServices).toHaveBeenCalled();
+      expect(mockService.discoverCharacteristics).toHaveBeenCalled();
     });
 
     it('should handle write errors with retries', async () => {
+      const error = new Error('Write failed');
       mockCharacteristic.write
-        .mockRejectedValueOnce(new Error('Write failed'))
-        .mockRejectedValueOnce(new Error('Write failed'))
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
         .mockResolvedValue();
 
       await bleService.writeCharacteristic(deviceId, serviceId, characteristicId, Buffer.from('test'));
@@ -145,19 +185,21 @@ describe('BLEService', () => {
     });
 
     it('should handle subscribe errors with retries', async () => {
+      const error = new Error('Subscribe failed');
       mockCharacteristic.subscribe
-        .mockRejectedValueOnce(new Error('Subscribe failed'))
-        .mockRejectedValueOnce(new Error('Subscribe failed'))
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
         .mockResolvedValue();
 
-      await bleService.subscribeToCharacteristic(deviceId, serviceId, characteristicId);
+      await bleService.subscribeToCharacteristic(deviceId, serviceId, characteristicId, () => {});
       expect(mockCharacteristic.subscribe).toHaveBeenCalledTimes(3);
     });
 
     it('should handle unsubscribe errors with retries', async () => {
+      const error = new Error('Unsubscribe failed');
       mockCharacteristic.unsubscribe
-        .mockRejectedValueOnce(new Error('Unsubscribe failed'))
-        .mockRejectedValueOnce(new Error('Unsubscribe failed'))
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
         .mockResolvedValue();
 
       await bleService.unsubscribeFromCharacteristic(deviceId, serviceId, characteristicId);

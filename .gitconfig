@@ -1,0 +1,30 @@
+[core]
+    hooksPath = .github/hooks
+
+[commit]
+    template = .gitmessage
+
+[pull]
+    rebase = true
+
+[branch]
+    autosetuprebase = always
+
+[push]
+    default = current
+
+[merge]
+    ff = only
+
+[rebase]
+    autosquash = true
+    autostash = true
+
+[status]
+    showUntrackedFiles = all
+
+[diff]
+    algorithm = histogram
+
+[fetch]
+    prune = true

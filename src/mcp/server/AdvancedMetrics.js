@@ -564,7 +564,7 @@ class AdvancedMetrics {
   updateResourceThresholds(newThresholds) {
     try {
       Object.entries(newThresholds).forEach(([key, value]) => {
-        if (value >= 0 && value <= 1 && this.resourceThresholds.hasOwnProperty(key)) {
+        if (value >= 0 && value <= 1 && Object.prototype.hasOwnProperty.call(this.resourceThresholds, key)) {
           this.resourceThresholds[key] = value;
         }
       });
@@ -807,6 +807,10 @@ class AdvancedMetrics {
         resourceUsage: false
       };
     }
+  }
+
+  hasMetric(metricName) {
+    return Object.prototype.hasOwnProperty.call(this.metrics, metricName);
   }
 }
 

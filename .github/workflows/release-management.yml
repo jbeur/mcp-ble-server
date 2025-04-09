@@ -1,0 +1,168 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        type: string
+      type:
+        description: 'Release type'
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - prerelease
+      notes:
+        description: 'Release notes'
+        required: false
+        type: string
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Check version format
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "Invalid version format"
+            exit 1
+          fi
+          
+      - name: Check for existing tag
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ inputs.version }}"; then
+            echo "Tag ${{ inputs.version }} already exists"
+            exit 1
+          fi
+          
+      - name: Check for uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "There are uncommitted changes"
+            exit 1
+          fi
+
+  prepare:
+    name: Prepare Release
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Update version
+        run: |
+          npm version ${{ inputs.type }} --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+      - name: Generate changelog
+        run: |
+          npm run changelog
+          git add CHANGELOG.md
+          git commit -m "chore: update changelog for ${{ env.VERSION }}"
+          
+      - name: Create release branch
+        run: |
+          git checkout -b release/${{ env.VERSION }}
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ env.VERSION }}"
+          git push origin release/${{ env.VERSION }}
+          
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v4
+        with:
+          title: "Release ${{ env.VERSION }}"
+          body: |
+            # Release ${{ env.VERSION }}
+            
+            ${{ inputs.notes }}
+            
+            ## Changelog
+            $(cat CHANGELOG.md | sed -n "/## \[${{ env.VERSION }}\]/,/## \[/p" | head -n -1)
+          branch: release/${{ env.VERSION }}
+          base: main
+          delete-branch: true
+
+  release:
+    name: Create Release
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build
+        run: npm run build
+        
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }}
+          body: |
+            # Release ${{ env.VERSION }}
+            
+            ${{ inputs.notes }}
+            
+            ## Changelog
+            $(cat CHANGELOG.md | sed -n "/## \[${{ env.VERSION }}\]/,/## \[/p" | head -n -1)
+          draft: false
+          prerelease: ${{ inputs.type == 'prerelease' }}
+          
+      - name: Notify release
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "MCP BLE Server ${{ env.VERSION }} released",
+              "attachments": [
+                {
+                  "color": "good",
+                  "fields": [
+                    {
+                      "title": "Version",
+                      "value": "${{ env.VERSION }}",
+                      "short": true
+                    },
+                    {
+                      "title": "Type",
+                      "value": "${{ inputs.type }}",
+                      "short": true
+                    }
+                  ]
+                }
+              ]
+            }' 

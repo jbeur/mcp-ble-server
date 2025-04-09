@@ -75,8 +75,10 @@ class ConnectionShutdown {
   async waitForQuiescence(connections, timeout = this.options.quiescenceTimeout) {
     logger.info('Waiting for connections to become idle', { count: connections.length });
     const startTime = Date.now();
+    const maxRetries = Math.floor(timeout / 100); // Maximum number of retries based on timeout and check interval
+    let retryCount = 0;
 
-    while (true) {
+    while (retryCount < maxRetries) {
       // Update active connections metric
       const activeCount = connections.filter(conn => conn.isActive?.()).length;
       this.activeConnections.set(activeCount);
@@ -95,6 +97,37 @@ class ConnectionShutdown {
 
       // Wait before next check
       await new Promise(resolve => setTimeout(resolve, 100));
+      retryCount++;
+    }
+
+    throw new Error('Maximum retry count reached while waiting for connections to become idle');
+  }
+
+  async shutdown() {
+    try {
+      const activeConnections = this.getActiveConnections();
+      
+      if (activeConnections.length === 0) {
+        logger.info('No active connections to shutdown');
+        return;
+      }
+
+      logger.info(`Shutting down ${activeConnections.length} active connections`);
+      
+      for (const connection of activeConnections) {
+        try {
+          await this.closeConnection(connection);
+        } catch (error) {
+          logger.error('Error closing connection:', error);
+          metrics.incrementCounter('connection_shutdown_errors');
+        }
+      }
+      
+      logger.info('All connections shutdown complete');
+    } catch (error) {
+      logger.error('Error during connection shutdown:', error);
+      metrics.incrementCounter('shutdown_errors');
+      throw error;
     }
   }
 }

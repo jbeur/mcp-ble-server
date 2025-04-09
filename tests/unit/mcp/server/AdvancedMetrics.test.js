@@ -669,7 +669,7 @@ describe('AdvancedMetrics', () => {
         {
           connectionId,
           deviceId,
-          error: "performanceMetrics.gauge is not a function"
+          error: 'performanceMetrics.gauge is not a function'
         }
       );
     });

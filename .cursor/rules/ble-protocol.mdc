@@ -1,0 +1,52 @@
+# ble-protocol
+
+### Connection Management
+- MUST: Implement connection pooling with `ConnectionPool.js` using priority tiers (high/medium/low)
+- MUST: Handle automatic cleanup of idle connections after 300s
+- AVOID: Direct connection management without pooling
+- WHY: Ensures efficient BLE connection resource utilization
+- EXAMPLE: `src/ble/ConnectionPool.js` priority-based allocation system
+
+### Device Discovery
+- MUST: Use adaptive scan windows from `DeviceDiscoveryOptimization.js`
+- MUST: Adjust scan parameters based on device density (>10: 150%, <5: 80%)
+- AVOID: Fixed scan windows or static parameters
+- WHY: Optimizes discovery in varying device environments
+- EXAMPLE: `src/ble/DeviceDiscoveryOptimization.js` density-based scanning
+
+### Power Management 
+- MUST: Implement multi-factor power control in `PowerLevelAdjustment.js`
+- MUST: Use RSSI thresholds (-50dBm to -100dBm) and battery levels (<20%, <50%, <100%)
+- AVOID: Static power levels or single-factor adjustments
+- WHY: Balances connection quality with battery life
+- EXAMPLE: `src/ble/PowerLevelAdjustment.js` adaptive power control
+
+### Characteristic Operations
+- MUST: Use priority queuing (high/medium/low) from `CharacteristicOperations.js`
+- MUST: Implement automatic retries for high-priority operations
+- AVOID: Direct characteristic access without queueing
+- WHY: Ensures reliable characteristic operations under load
+- EXAMPLE: `src/ble/CharacteristicOperations.js` batched operations
+
+### Connection Parameters
+- MUST: Use dynamic parameter adjustment from `ConnectionParameters.js`
+- MUST: Adjust based on battery level, data rates, and stability
+- AVOID: Static connection parameters
+- WHY: Optimizes connection for current conditions
+- EXAMPLE: `src/ble/ConnectionParameters.js` adaptive parameters
+
+### Priority Scanning
+- MUST: Implement weighted scanning (4x high, 2x medium, 1x low)
+- MUST: Use adaptive intervals from `PriorityScanning.js`
+- AVOID: Equal distribution of scan resources
+- WHY: Prioritizes critical device discovery
+- EXAMPLE: `src/ble/PriorityScanning.js` priority weights
+
+### RSSI Management
+- MUST: Use signal classification from `RSSIThresholds.js`
+- MUST: Implement anomaly detection (1.5 SD or 15 dBm drops)
+- AVOID: Binary good/bad signal classification
+- WHY: Ensures reliable signal quality assessment
+- EXAMPLE: `src/ble/RSSIThresholds.js` threshold system
+
+$END$

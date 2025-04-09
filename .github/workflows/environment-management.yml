@@ -1,0 +1,142 @@
+name: Environment Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - create
+          - update
+          - destroy
+          - validate
+      environment:
+        description: 'Environment to manage'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      force:
+        description: 'Force action (skip checks)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    name: Validate Environment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Validate environment configuration
+        run: npm run env:validate
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Check resource limits
+        run: npm run env:check-limits
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Check security compliance
+        if: ${{ !inputs.force }}
+        run: npm run env:check-security
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+
+  manage:
+    name: Manage Environment
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Setup AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Deploy infrastructure
+        if: ${{ inputs.action == 'create' || inputs.action == 'update' }}
+        run: npm run env:deploy
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTION: ${{ inputs.action }}
+          
+      - name: Destroy infrastructure
+        if: ${{ inputs.action == 'destroy' }}
+        run: npm run env:destroy
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Validate environment
+        if: ${{ inputs.action == 'validate' }}
+        run: npm run env:validate
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Update environment variables
+        if: ${{ inputs.action == 'create' || inputs.action == 'update' }}
+        run: npm run env:update-vars
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Verify environment health
+        if: ${{ inputs.action == 'create' || inputs.action == 'update' }}
+        run: npm run env:check-health
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          
+      - name: Notify environment status
+        if: always()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "Environment ${{ inputs.environment }} ${{ inputs.action }} ${{ job.status }}",
+              "attachments": [
+                {
+                  "color": "${{ job.status == 'success' && 'good' || 'danger' }}",
+                  "fields": [
+                    {
+                      "title": "Environment",
+                      "value": "${{ inputs.environment }}",
+                      "short": true
+                    },
+                    {
+                      "title": "Action",
+                      "value": "${{ inputs.action }}",
+                      "short": true
+                    },
+                    {
+                      "title": "Status",
+                      "value": "${{ job.status }}",
+                      "short": true
+                    }
+                  ]
+                }
+              ]
+            }' 

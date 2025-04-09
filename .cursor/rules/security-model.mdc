@@ -1,0 +1,68 @@
+# security-model
+
+### Authentication Flows
+- MUST: Implement dual-key rotation system with maximum 2 valid keys per client
+  - Use `src/auth/ApiKeyRotation.js` for rotation logic
+  - Enforce 7-day maximum key age
+  - Maintain 24-hour rotation interval
+- AVOID: Single key systems or client-provided session IDs
+- WHY: Enables zero-downtime credential rotation while preventing session fixation
+- EXAMPLE: See `src/auth/AuthService.js` implementation
+
+### Request Signing
+- MUST: Use HMAC-based signing with required components:
+  - HTTP method
+  - Path
+  - Headers
+  - Request body
+  - 5-minute timestamp tolerance
+  - Implemented in `src/auth/RequestSigning.js`
+- AVOID: Simple token-based auth or plaintext credentials
+- WHY: Prevents request tampering and replay attacks
+- EXAMPLE: See `src/mcp/security/RequestSigning.js`
+
+### Session Security 
+- MUST: Implement using:
+  - AES-256-GCM encryption
+  - Per-session IV generation
+  - Authentication tags
+  - 1-hour session lifetime
+  - Rolling activity window
+- AVOID: Static encryption keys or IVs
+- WHY: Ensures session data confidentiality and integrity
+- EXAMPLE: See `src/auth/SessionEncryption.js`
+
+### Threat Detection
+- MUST: Implement multi-factor analysis:
+  - Track auth failures with 5-attempt limit
+  - 15-minute lockout duration
+  - Both IP and client-based blocking
+  - Severity-based response system
+  - Use `src/security/ThreatDetectionService.js`
+- AVOID: Single-factor blocks or permanent bans
+- WHY: Provides graduated response to potential threats
+- EXAMPLE: See auth failure handling in `src/security/ThreatDetectionService.js`
+
+### Vulnerability Scanning
+- MUST: Check for:
+  - SweynTooth vulnerabilities (CVSS 9.8)
+  - BLESA vulnerabilities (CVSS 8.5)
+  - Weak authentication methods (CVSS 8.0)
+  - Insufficient key sizes (CVSS 7.0)
+  - Use `src/security/VulnerabilityScanner.js`
+- AVOID: Single vulnerability checks or manual scanning
+- WHY: Proactive detection of common BLE security issues
+- EXAMPLE: See scan implementation in `src/security/VulnerabilityScanner.js`
+
+### Rate Limiting
+- MUST: Implement sliding window rate limiting:
+  - Client-specific tracking
+  - Configurable window sizes
+  - Priority-based limits
+  - "Fail-closed" default policy
+  - Use `src/security/RateLimiter.js`
+- AVOID: Fixed window or global rate limits
+- WHY: Prevents abuse while maintaining service for legitimate users
+- EXAMPLE: See `src/auth/RateLimiter.js`
+
+$END$

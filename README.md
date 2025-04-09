@@ -158,6 +158,59 @@ node --expose-gc src/index.js
 
 ## Testing
 
+### Test Categories
+
+1. **Unit Tests**
+   - Located in `tests/unit/`
+   - Test individual components in isolation
+   - Use Jest for testing framework
+   - Mock external dependencies
+
+2. **Integration Tests**
+   - Located in `tests/integration/`
+   - Test component interactions
+   - Test system behavior
+
+3. **Performance Tests**
+   - Located in `tests/performance/`
+   - Test system under load
+   - Measure response times
+   - Monitor resource usage
+
+4. **Security Tests**
+   - Located in `tests/security/`
+   - Test authentication
+   - Test authorization
+   - Test encryption
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run specific test file
+npm test -- tests/unit/utils/Base64Utils.test.js
+
+# Run tests with coverage
+npm test -- --coverage
+
+# Run tests in watch mode
+npm test -- --watch
+
+# Run tests with verbose output
+npm test -- --verbose
+```
+
+### Test Coverage
+
+Current test coverage status:
+- Base64Utils: 100% (22 passing tests)
+  - Hardware acceleration tests
+  - Encoding/decoding tests
+  - Validation tests
+  - Stream operation tests
+
 ### Memory Management Tests
 
 ```bash
@@ -167,6 +220,36 @@ npm test -- tests/unit/utils/MemoryManager.test.js
 # Run cache layer tests with memory management
 npm test -- tests/unit/mcp/server/CachingLayer.test.js
 ```
+
+## CI/CD Pipeline
+
+The project uses GitHub Actions for continuous integration and deployment:
+
+1. **Test Job**
+   - Runs on Ubuntu
+   - Installs Node.js
+   - Runs all tests
+   - Uploads coverage reports
+
+2. **Lint Job**
+   - Runs ESLint
+   - Enforces code style
+   - Checks for common issues
+
+3. **Security Job**
+   - Runs security audit
+   - Checks dependencies
+   - Generates security reports
+
+4. **Build Job**
+   - Builds the project
+   - Verifies build output
+   - Creates artifacts
+
+5. **Deploy Job**
+   - Deploys to staging
+   - Requires approval
+   - Monitors deployment
 
 ## Contributing
 

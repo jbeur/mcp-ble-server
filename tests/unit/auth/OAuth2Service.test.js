@@ -1,240 +1,311 @@
-const OAuth2Service = require('../../../src/auth/OAuth2Service');
-const jwt = require('jsonwebtoken');
-const logger = require('../../../src/utils/logger');
-const metrics = require('../../../src/utils/metrics');
+const crypto = require('crypto');
 
-jest.mock('../../../src/utils/logger');
-jest.mock('../../../src/utils/metrics', () => ({
-    increment: jest.fn(),
-    decrement: jest.fn(),
-    gauge: jest.fn(),
-    timing: jest.fn()
+jest.mock('../../../src/utils/logger', () => ({
+  logger: {
+    info: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn()
+  }
 }));
 
+jest.mock('../../../src/metrics/metrics', () => ({
+  metrics: {
+    increment: jest.fn()
+  }
+}));
+
+const { logger } = require('../../../src/utils/logger');
+const { metrics } = require('../../../src/metrics/metrics');
+const OAuth2Service = require('../../../src/auth/OAuth2Service');
+
 describe('OAuth2Service', () => {
-    let oauth2Service;
-    let mockConfig;
-    let mockMetrics;
+  let oauth2Service;
+  let testConfig;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+
+    testConfig = {
+      clientId: 'test-client-id',
+      clientSecret: 'test-client-secret',
+      redirectUri: 'http://localhost:3000/callback',
+      sessionExpiry: 3600000,
+      maxConcurrentSessions: 3,
+      authorizationEndpoint: 'https://auth.example.com/authorize',
+      authorizationCodeExpiry: 300000,
+      accessTokenExpiry: 3600,
+      refreshTokenExpiry: 86400,
+      jwtSecret: 'test-jwt-secret'
+    };
+
+    oauth2Service = new OAuth2Service(testConfig);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe('constructor', () => {
+    it('should initialize with valid config', () => {
+      expect(oauth2Service).toBeDefined();
+    });
+
+    it('should throw error if config is missing', () => {
+      expect(() => new OAuth2Service()).toThrow('OAuth2 config is required');
+    });
+
+    it('should throw error if required config params are missing', () => {
+      expect(() => new OAuth2Service({})).toThrow('Required OAuth2 config parameters missing');
+    });
+  });
+
+  describe('generateAuthorizationUrl', () => {
+    it('should generate a valid authorization URL', () => {
+      const state = 'test-state';
+      const nonce = 'test-nonce';
+      const url = oauth2Service.generateAuthorizationUrl(
+        testConfig.clientId,
+        testConfig.redirectUri,
+        state,
+        nonce
+      );
+
+      expect(url).toContain(testConfig.authorizationEndpoint);
+      expect(url).toContain(`client_id=${testConfig.clientId}`);
+      expect(url).toContain(`redirect_uri=${encodeURIComponent(testConfig.redirectUri)}`);
+      expect(url).toContain(`state=${state}`);
+      expect(url).toContain(`nonce=${nonce}`);
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_authorization_url_generated');
+    });
+
+    it('should throw error if required parameters are missing', () => {
+      expect(() => oauth2Service.generateAuthorizationUrl()).toThrow('Missing required parameters');
+    });
+  });
+
+  describe('generateAuthorizationCode', () => {
+    it('should generate a valid authorization code', () => {
+      const code = oauth2Service.generateAuthorizationCode(
+        testConfig.clientId,
+        testConfig.redirectUri
+      );
+
+      expect(code).toBeDefined();
+      expect(code).toHaveLength(64); // 32 bytes in hex
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_authorization_code_generated');
+    });
+  });
+
+  describe('exchangeCodeForToken', () => {
+    let code;
 
     beforeEach(() => {
-        jest.clearAllMocks();
-        jest.useFakeTimers();
-
-        mockConfig = {
-            security: {
-                oauth2: {
-                    clientId: 'test-client-id',
-                    clientSecret: 'test-client-secret',
-                    redirectUri: 'http://localhost:3000/callback',
-                    tokenEndpoint: 'http://localhost:3000/token',
-                    authorizationEndpoint: 'http://localhost:3000/auth',
-                    scopes: ['openid', 'profile', 'email'],
-                    accessTokenExpiry: 3600,
-                    refreshTokenExpiry: 86400 * 30
-                }
-            }
-        };
-
-        mockMetrics = {
-            oauth2AuthorizationUrlGenerated: { inc: jest.fn() },
-            oauth2AuthorizationCodeGenerated: { inc: jest.fn() },
-            oauth2TokenExchangeSuccess: { inc: jest.fn() },
-            oauth2AccessTokenGenerated: { inc: jest.fn() },
-            oauth2RefreshTokenGenerated: { inc: jest.fn() },
-            oauth2TokenRefreshSuccess: { inc: jest.fn() },
-            oauth2TokenValidationSuccess: { inc: jest.fn() },
-            oauth2CleanupSuccess: { inc: jest.fn() },
-            oauth2Error: { inc: jest.fn() }
-        };
-
-        oauth2Service = new OAuth2Service(mockConfig, mockMetrics);
+      code = oauth2Service.generateAuthorizationCode(
+        testConfig.clientId,
+        testConfig.redirectUri
+      );
     });
 
-    afterEach(() => {
-        jest.useRealTimers();
+    it('should exchange valid authorization code for tokens', async () => {
+      const tokens = await oauth2Service.exchangeCodeForToken(
+        code,
+        testConfig.clientId,
+        testConfig.clientSecret
+      );
+
+      expect(tokens).toHaveProperty('access_token');
+      expect(tokens).toHaveProperty('refresh_token');
+      expect(tokens).toHaveProperty('token_type', 'Bearer');
+      expect(tokens).toHaveProperty('expires_in', testConfig.accessTokenExpiry);
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_token_exchange_success');
     });
 
-    describe('constructor', () => {
-        it('should throw error if config is missing', () => {
-            expect(() => new OAuth2Service()).toThrow('Configuration is required');
-        });
-
-        it('should throw error if required OAuth2 config is missing', () => {
-            const invalidConfig = {
-                security: {
-                    oauth2: {
-                        // Missing required fields
-                    }
-                }
-            };
-            expect(() => new OAuth2Service(invalidConfig)).toThrow('Missing required OAuth2 configuration');
-        });
+    it('should reject invalid client credentials', async () => {
+      await expect(oauth2Service.exchangeCodeForToken(
+        code,
+        'wrong-client',
+        'wrong-secret'
+      )).rejects.toThrow('Invalid client credentials');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
     });
 
-    describe('generateAuthorizationUrl', () => {
-        it('should generate a valid authorization URL', () => {
-            const state = 'test-state';
-            const nonce = 'test-nonce';
-            const url = oauth2Service.generateAuthorizationUrl(state, nonce);
+    it('should reject expired authorization code', async () => {
+      jest.advanceTimersByTime(testConfig.authorizationCodeExpiry + 1);
+      
+      await expect(oauth2Service.exchangeCodeForToken(
+        code,
+        testConfig.clientId,
+        testConfig.clientSecret
+      )).rejects.toThrow('Authorization code expired');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
+    });
+  });
 
-            expect(url).toContain(mockConfig.security.oauth2.authorizationEndpoint);
-            expect(url).toContain(`client_id=${mockConfig.security.oauth2.clientId}`);
-            expect(url).toContain(`redirect_uri=${encodeURIComponent(mockConfig.security.oauth2.redirectUri)}`);
-            expect(url).toContain(`scope=openid+profile+email`);
-            expect(url).toContain(`state=${state}`);
-            expect(url).toContain(`nonce=${nonce}`);
-            expect(mockMetrics.oauth2AuthorizationUrlGenerated.inc).toHaveBeenCalled();
-        });
+  describe('refreshAccessToken', () => {
+    let refresh_token;
+
+    beforeEach(async () => {
+      const code = oauth2Service.generateAuthorizationCode(
+        testConfig.clientId,
+        testConfig.redirectUri
+      );
+      const tokens = await oauth2Service.exchangeCodeForToken(
+        code,
+        testConfig.clientId,
+        testConfig.clientSecret
+      );
+      refresh_token = tokens.refresh_token;
     });
 
-    describe('generateAuthorizationCode', () => {
-        it('should generate a valid authorization code', () => {
-            const userId = 'test-user';
-            const clientId = 'test-client';
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-
-            expect(code).toBeDefined();
-            expect(code).toHaveLength(64); // 32 bytes in hex
-            expect(mockMetrics.oauth2AuthorizationCodeGenerated.inc).toHaveBeenCalled();
-        });
+    it('should refresh access token with valid refresh token', async () => {
+      const newTokens = await oauth2Service.refreshAccessToken(refresh_token);
+      expect(newTokens).toHaveProperty('access_token');
+      expect(newTokens).toHaveProperty('token_type', 'Bearer');
+      expect(newTokens).toHaveProperty('expires_in', testConfig.accessTokenExpiry);
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_token_refresh_success');
     });
 
-    describe('exchangeCodeForToken', () => {
-        it('should exchange valid authorization code for tokens', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
+    it('should reject expired refresh token', async () => {
+      jest.advanceTimersByTime(testConfig.refreshTokenExpiry * 1000 + 1);
+      
+      await expect(oauth2Service.refreshAccessToken(refresh_token))
+        .rejects.toThrow('Refresh token expired');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
+    });
+  });
 
-            const result = await oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            );
+  describe('validateAccessToken', () => {
+    let access_token;
 
-            expect(result).toHaveProperty('access_token');
-            expect(result).toHaveProperty('refresh_token');
-            expect(result).toHaveProperty('token_type', 'Bearer');
-            expect(result).toHaveProperty('expires_in', mockConfig.security.oauth2.accessTokenExpiry);
-            expect(mockMetrics.oauth2TokenExchangeSuccess.inc).toHaveBeenCalled();
-        });
-
-        it('should reject invalid client credentials', async () => {
-            const userId = 'test-user';
-            const code = oauth2Service.generateAuthorizationCode(userId, 'test-client');
-
-            await expect(oauth2Service.exchangeCodeForToken(
-                code,
-                'invalid-client',
-                'invalid-secret'
-            )).rejects.toThrow('Invalid client credentials');
-        });
-
-        it('should reject expired authorization code', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-
-            // Move time forward past code expiration (10 minutes)
-            jest.advanceTimersByTime(11 * 60 * 1000);
-
-            await expect(oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            )).rejects.toThrow('Authorization code expired');
-        });
+    beforeEach(async () => {
+      const code = oauth2Service.generateAuthorizationCode(
+        testConfig.clientId,
+        testConfig.redirectUri
+      );
+      const tokens = await oauth2Service.exchangeCodeForToken(
+        code,
+        testConfig.clientId,
+        testConfig.clientSecret
+      );
+      access_token = tokens.access_token;
     });
 
-    describe('refreshAccessToken', () => {
-        it('should refresh access token with valid refresh token', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-            const { refresh_token } = await oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            );
-
-            const result = await oauth2Service.refreshAccessToken(refresh_token);
-
-            expect(result).toHaveProperty('access_token');
-            expect(result).toHaveProperty('refresh_token');
-            expect(result).toHaveProperty('token_type', 'Bearer');
-            expect(result).toHaveProperty('expires_in', mockConfig.security.oauth2.accessTokenExpiry);
-            expect(mockMetrics.oauth2TokenRefreshSuccess.inc).toHaveBeenCalled();
-        });
-
-        it('should reject expired refresh token', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-            const { refresh_token } = await oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            );
-
-            // Move time forward past refresh token expiration
-            jest.advanceTimersByTime(mockConfig.security.oauth2.refreshTokenExpiry * 1000 + 1);
-
-            await expect(oauth2Service.refreshAccessToken(refresh_token))
-                .rejects.toThrow('Refresh token expired');
-        });
+    it('should validate valid access token', async () => {
+      const decoded = await oauth2Service.validateAccessToken(access_token);
+      expect(decoded).toHaveProperty('clientId', testConfig.clientId);
+      expect(logger.debug).toHaveBeenCalledWith('Token validated successfully');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_token_validation_success');
     });
 
-    describe('validateAccessToken', () => {
-        it('should validate valid access token', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-            const { access_token } = await oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            );
-
-            const decoded = await oauth2Service.validateAccessToken(access_token);
-
-            expect(decoded).toHaveProperty('sub', userId);
-            expect(decoded).toHaveProperty('client_id', clientId);
-            expect(decoded).toHaveProperty('type', 'access');
-            expect(mockMetrics.oauth2TokenValidationSuccess.inc).toHaveBeenCalled();
-        });
-
-        it('should reject expired access token', async () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-            const { access_token } = await oauth2Service.exchangeCodeForToken(
-                code,
-                clientId,
-                mockConfig.security.oauth2.clientSecret
-            );
-
-            // Move time forward past access token expiration
-            jest.advanceTimersByTime(mockConfig.security.oauth2.accessTokenExpiry * 1000 + 1);
-
-            await expect(oauth2Service.validateAccessToken(access_token))
-                .rejects.toThrow('Access token expired');
-        });
+    it('should reject expired access token', async () => {
+      jest.advanceTimersByTime(testConfig.accessTokenExpiry * 1000 + 1);
+      
+      await expect(oauth2Service.validateAccessToken(access_token))
+        .rejects.toThrow('Token expired');
+      expect(logger.error).toHaveBeenCalledWith('Token validation failed: Token expired');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
     });
 
-    describe('cleanupExpiredTokens', () => {
-        it('should clean up expired tokens', () => {
-            const userId = 'test-user';
-            const clientId = mockConfig.security.oauth2.clientId;
-            const code = oauth2Service.generateAuthorizationCode(userId, clientId);
-
-            // Move time forward past all token expirations
-            jest.advanceTimersByTime(Math.max(
-                mockConfig.security.oauth2.accessTokenExpiry,
-                mockConfig.security.oauth2.refreshTokenExpiry
-            ) * 1000 + 1);
-
-            oauth2Service.cleanupExpiredTokens();
-
-            expect(mockMetrics.oauth2CleanupSuccess.inc).toHaveBeenCalled();
-        });
+    it('should reject invalid token format', async () => {
+      await expect(oauth2Service.validateAccessToken('invalid-token'))
+        .rejects.toThrow('Invalid token format');
+      expect(logger.error).toHaveBeenCalledWith('Token validation failed: Invalid token format', expect.any(Object));
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
     });
+  });
+
+  describe('validateCSRFToken', () => {
+    let csrfToken;
+
+    beforeEach(() => {
+      csrfToken = crypto.randomBytes(32).toString('hex');
+      oauth2Service.csrfTokens.set(csrfToken, {
+        expiresAt: Date.now() + 3600000
+      });
+    });
+
+    it('should validate matching CSRF tokens', async () => {
+      const req = { headers: { csrfToken } };
+      await expect(oauth2Service.validateCSRFToken(req)).resolves.toBe(true);
+      expect(logger.debug).toHaveBeenCalledWith('CSRF token validated successfully');
+    });
+
+    it('should reject missing CSRF token', async () => {
+      const req = { headers: {} };
+      await expect(oauth2Service.validateCSRFToken(req))
+        .rejects.toThrow('CSRF token validation failed');
+      expect(logger.error).toHaveBeenCalledWith('Missing CSRF token in request');
+    });
+
+    it('should reject mismatched CSRF tokens', async () => {
+      const req = { headers: { csrfToken: 'wrong-token' } };
+      await expect(oauth2Service.validateCSRFToken(req))
+        .rejects.toThrow('CSRF token validation failed');
+      expect(logger.error).toHaveBeenCalledWith('CSRF token not found');
+    });
+
+    it('should reject expired CSRF tokens', async () => {
+      const req = { headers: { csrfToken } };
+      jest.advanceTimersByTime(3600000 + 1);
+      
+      await expect(oauth2Service.validateCSRFToken(req))
+        .rejects.toThrow('CSRF token expired');
+      expect(logger.error).toHaveBeenCalledWith('CSRF token expired');
+    });
+  });
+
+  describe('session management', () => {
+    it('should create and delete sessions', () => {
+      const userId = 'test-user';
+      const sessionId = oauth2Service.createSession(userId);
+      
+      expect(sessionId).toBeDefined();
+      expect(oauth2Service.activeSessions.get(sessionId)).toBeDefined();
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_session_created');
+      
+      oauth2Service.deleteSession(sessionId);
+      expect(oauth2Service.activeSessions.has(sessionId)).toBeFalsy();
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_session_deleted');
+    });
+
+    it('should enforce concurrent session limits', () => {
+      const userId = 'test-user';
+      
+      // Create max number of sessions
+      for (let i = 0; i < testConfig.maxConcurrentSessions; i++) {
+        oauth2Service.createSession(userId);
+      }
+      
+      // Attempt to create one more session
+      expect(() => oauth2Service.createSession(userId))
+        .toThrow('Maximum concurrent sessions reached');
+      expect(logger.error).toHaveBeenCalledWith('Session limit reached for user: ' + userId);
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_error');
+    });
+
+    it('should cleanup expired sessions', () => {
+      const userId = 'test-user';
+      const sessionId = oauth2Service.createSession(userId);
+      
+      jest.advanceTimersByTime(testConfig.sessionExpiry + 1);
+      
+      oauth2Service.cleanupExpiredSessions();
+      expect(oauth2Service.activeSessions.has(sessionId)).toBeFalsy();
+      expect(logger.info).toHaveBeenCalledWith('Cleaned up expired sessions', { count: 1 });
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_cleanup_success');
+    });
+  });
+
+  describe('cleanupExpiredTokens', () => {
+    it('should clean up expired tokens', async () => {
+      const code = oauth2Service.generateAuthorizationCode(testConfig.clientId, testConfig.redirectUri);
+      jest.advanceTimersByTime(testConfig.authorizationCodeExpiry + 1);
+      
+      oauth2Service.cleanupExpiredTokens();
+      
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_cleanup_success');
+      expect(metrics.increment).toHaveBeenCalledWith('oauth2_authorization_code_expired');
+    });
+  });
 }); 

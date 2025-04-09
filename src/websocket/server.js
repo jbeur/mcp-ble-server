@@ -49,13 +49,13 @@ class WebSocketServer extends EventEmitter {
 
       // Process message based on type
       switch (parsedMessage.type) {
-        case 'test':
-          // Handle test message
-          break;
-        case 'error':
-          throw new Error('Test error message');
-        default:
-          logger.warn('Unknown message type:', parsedMessage.type);
+      case 'test':
+        // Handle test message
+        break;
+      case 'error':
+        throw new Error('Test error message');
+      default:
+        logger.warn('Unknown message type:', parsedMessage.type);
       }
 
       // Emit message event

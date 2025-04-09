@@ -1,0 +1,73 @@
+
+START SPECIFICATION:
+# main-overview
+
+## Development Guidelines
+
+- Only modify code directly relevant to the specific request. Avoid changing unrelated functionality.
+- Never replace code with placeholders like `# ... rest of the processing ...`. Always include complete code.
+- Break problems into smaller steps. Think through each step separately before implementing.
+- Always provide a complete PLAN with REASONING based on evidence from code and logs before making changes.
+- Explain your OBSERVATIONS clearly, then provide REASONING to identify the exact issue. Add console logs when needed to gather more information.
+
+
+The system implements a comprehensive BLE device management and monitoring platform with several core business domains:
+
+1. Predictive Resource Management (src/metrics/)
+- Predictive load scaling using time-series analysis
+- Resource forecasting for memory, CPU, network
+- Multi-factor scaling recommendations engine
+- Hierarchical SLA monitoring with violation priority system
+
+2. Authentication & Security (src/auth/, src/security/)
+- OAuth2 implementation with custom token lifecycle
+- Multi-layer API key management with rotation
+- Threat detection with severity-based responses
+- Security scoring and auditing system
+
+3. BLE Device Management (src/ble/)
+- Priority-based connection pooling
+- Adaptive device discovery optimization
+- Signal quality monitoring with RSSI thresholds
+- Power level adjustment based on device priorities
+
+4. Message Control Protocol (src/mcp/)
+- Priority-based message batching
+- Circuit breaker pattern for connection management
+- Transaction consistency with automatic recovery
+- Resource limiting with dynamic thresholds
+
+5. Core Metrics & Analysis (src/metrics/)
+- Resource trend analysis with confidence scoring
+- Predictive scaling recommendations
+- SLA compliance monitoring
+- Performance metric collection
+
+Code Conventions:
+
+### Device Management 
+- MUST: Implement priority levels (HIGH/MEDIUM/LOW) for all device operations
+- AVOID: Direct device connections without going through connection pool
+- WHY: Ensures consistent resource management and priority handling
+- EXAMPLE: src/ble/ConnectionPool.js priority system implementation
+
+### Security Implementation
+- MUST: Use dual-token system with refresh/access tokens
+- AVOID: Storing tokens without encryption
+- WHY: Maintains security while enabling token rotation
+- EXAMPLE: src/auth/TokenAuthentication.js token lifecycle
+
+### Message Processing
+- MUST: Implement batching based on priority tiers
+- AVOID: Single message processing without batching consideration
+- WHY: Optimizes throughput while maintaining priority handling
+- EXAMPLE: src/mcp/server/MessageBatcher.js implementation
+
+### Monitoring
+- MUST: Track all SLA metrics with violation priorities
+- AVOID: Direct metric collection without priority classification
+- WHY: Enables proper violation handling and escalation
+- EXAMPLE: src/metrics/slaMonitoring.js violation tracking
+
+$END$
+END SPECIFICATION
