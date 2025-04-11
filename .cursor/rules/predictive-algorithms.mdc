@@ -1,44 +1,55 @@
+---
+description: Handles predictive scaling, resource forecasting, and trend analysis for BLE device management and connection optimization
+globs: ["src/metrics/predictive*.js", "src/metrics/*forecasting*.js", "src/metrics/*trend*.js", "src/metrics/*scaling*.js"]
+alwaysApply: false
+---
+
+
 # predictive-algorithms
 
-### Resource Prediction Algorithms
-- MUST: Implement load prediction using linear regression in `src/metrics/predictiveScaling.js`
-- MUST: Maintain configurable 1-hour history window of load measurements
-- MUST: Generate 5-minute interval predictions up to 1 hour ahead
-- MUST: Enforce minimum 12 data points for reliable predictions
-- AVOID: Using single-point predictions without historical context
-- WHY: Ensures statistically significant prediction models with sufficient data density
-- EXAMPLE: `src/metrics/predictiveScaling.js` implementation of time-series load forecasting
+Core Predictive Components:
 
-### Multi-Resource Forecasting
-- MUST: Track memory, CPU, network metrics separately in `src/metrics/resourceForecasting.js`
-- MUST: Implement resource-specific boundaries (CPU: 0-100%, Memory: 0-max)
-- MUST: Generate coordinated predictions across all resources
-- AVOID: Mixing prediction models across different resource types
-- WHY: Different resources have distinct patterns and constraints requiring specialized handling
-- EXAMPLE: Resource-specific tracking in `src/metrics/resourceForecasting.js`
+1. Load Prediction System (src/metrics/predictiveScaling.js)
+- Time-series based load forecasting using rolling 1-hour windows
+- 5-minute interval predictions up to 1 hour ahead
+- Minimum 12 data points required for prediction validity
+- Correlation tracking between predicted vs actual loads
+Importance Score: 95
 
-### Scaling Recommendations
-- MUST: Define thresholds (CPU: 80%, Memory: 80%, Network: 80%) in `src/metrics/scalingRecommendations.js`
-- MUST: Implement 300s cooldown between scaling decisions
-- MUST: Generate recommendations based on combined resource predictions
-- AVOID: Single-metric scaling decisions without considering other resources
-- WHY: Prevents thrashing and ensures holistic resource management
-- EXAMPLE: Multi-factor decision logic in `src/metrics/scalingRecommendations.js`
+2. Resource Usage Forecasting (src/metrics/resourceForecasting.js)
+- Multi-resource prediction matrix covering memory, CPU, network
+- Resource-specific validation boundaries:
+  * CPU: 0-100% utilization range
+  * Memory: Positive value constraints
+  * Network: Bandwidth thresholds
+- Cross-resource correlation analysis for prediction accuracy
+Importance Score: 90
 
-### Trend Analysis
-- MUST: Implement sliding window analysis in `src/metrics/trendAnalysis.js`
-- MUST: Use 10% threshold for significant trend changes
-- MUST: Calculate confidence scores based on coefficient of variation
-- AVOID: Making trend decisions without minimum 10 data points
-- WHY: Ensures reliable trend detection with statistical confidence
-- EXAMPLE: Trend classification implementation in `src/metrics/trendAnalysis.js`
+3. Trend Analysis Engine (src/metrics/trendAnalysis.js)
+- Resource utilization trend detection with 10% change thresholds
+- Custom confidence scoring using coefficient of variation
+- Rolling 1-hour historical data window
+- Trend classifications: increasing, decreasing, stable
+Importance Score: 85
 
-### Batch Prediction
-- MUST: Use ML-driven batch size prediction in `src/mcp/server/BatchPredictor.js`
-- MUST: Consider historical patterns for optimization
-- MUST: Adapt predictions based on priority levels
-- AVOID: Static batch sizes without historical context
-- WHY: Optimizes resource usage through learned patterns
-- EXAMPLE: Adaptive batch sizing in `src/mcp/server/BatchPredictor.js`
+4. Scaling Intelligence (src/metrics/scalingRecommendations.js)
+- Resource threshold monitoring (80% default)
+- Multi-factor scaling decision matrix
+- 300s minimum interval between scaling recommendations
+- Detailed reasoning audit trail for decisions
+Importance Score: 88
+
+Key Business Rules:
+- Predictive window sizes: 5-minute intervals, 1-hour horizon
+- Minimum data points: 12 for valid predictions
+- Trend classification threshold: 10% change
+- Resource monitoring thresholds: 80% default
+- Scaling recommendation cooldown: 300s
+
+File Dependencies:
+- src/metrics/predictiveScaling.js
+- src/metrics/resourceForecasting.js
+- src/metrics/trendAnalysis.js
+- src/metrics/scalingRecommendations.js
 
 $END$

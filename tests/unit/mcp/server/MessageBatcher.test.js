@@ -1,7 +1,4 @@
 const MessageBatcher = require('../../../../src/mcp/server/MessageBatcher');
-const logger = require('../../../../src/utils/logger');
-
-jest.mock('../../../../src/utils/logger');
 
 describe('MessageBatcher', () => {
   let batcher;
@@ -24,10 +21,8 @@ describe('MessageBatcher', () => {
     batcher = new MessageBatcher({
       batchSize: 5,
       batchTimeout: 1000,
-      compression: {
-        enabled: true,
-        threshold: 1000
-      },
+      compressionEnabled: true,
+      compressionThreshold: 1000,
       metrics: mockMetrics
     });
   });

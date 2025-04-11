@@ -1,66 +1,62 @@
-# Data-flow
+---
+description: Specifications for multi-component data flow patterns including MCP, batching, and inter-service communication
+globs: ["src/mcp/**/*.js", "src/ble/**/*.js", "src/metrics/**/*.js", "src/auth/**/*.js"]
+alwaysApply: false
+---
 
-### Message Control Protocol (MCP)
-- MUST: Implement priority-based message batching using `src/mcp/server/MessageBatcher.js`
-  - High priority: 50ms timeout
-  - Medium priority: 100ms timeout
-  - Low priority: 200ms timeout
-- AVOID: Direct message sending without batching classification
-- WHY: Optimizes network usage while maintaining QoS guarantees
-- EXAMPLE: `src/mcp/server/BatchPredictor.js` ML-driven batch sizing
 
-### Connection State Management
-- MUST: Track connection lifecycles in `src/mcp/server/ConnectionPool.js`
-  - Active connections
-  - Connection health
-  - Priority levels
-- AVOID: Direct connection handling without state tracking
-- WHY: Enables reliable failover and load balancing
-- EXAMPLE: `src/mcp/server/ConnectionHealth.js` health monitoring
+# data-flow
 
-### Data Consistency Protocol 
-- MUST: Implement transaction management in `src/mcp/server/DataConsistency.js`
-  - Checkpoint creation
-  - State synchronization
-  - Rollback capabilities
-- AVOID: Stateless message handling
-- WHY: Ensures data integrity across connection failures
-- EXAMPLE: `src/mcp/server/DisasterRecovery.js` recovery procedures
+The system implements a multi-layered data flow architecture centered around the Message Control Protocol (MCP):
 
-### Message Security Flow
-- MUST: Implement security layers in `src/mcp/security/MessageSecurity.js`
-  - Message signing
-  - Session encryption
-  - Request validation
-- AVOID: Unencrypted message transmission
-- WHY: Ensures message integrity and confidentiality
-- EXAMPLE: `src/mcp/security/SessionEncryption.js` encryption workflow
+1. Message Control Protocol (MCP) Core
+- Multi-tier message prioritization (HIGH/MEDIUM/LOW)
+- Priority-based batch processing with dynamic sizing
+- Custom header protocol:
+  - Magic number "MCP" identifier
+  - Version tracking
+  - Algorithm metadata
+- Adaptive compression selection based on data characteristics and size thresholds
 
-### Resource Management Flow
-- MUST: Monitor system resources via `src/mcp/server/ResourceLimiter.js`
-  - CPU utilization
-  - Memory usage
-  - Network bandwidth
-- AVOID: Unbounded resource consumption
-- WHY: Prevents system overload and maintains performance
-- EXAMPLE: `src/metrics/resourceForecasting.js` usage prediction
+2. BLE Data Flow Management
+- Connection pooling with adaptive scaling:
+  - Auto-scaling based on usage patterns
+  - Priority-based connection allocation
+  - Health metrics tracking
+- Device discovery optimization through:
+  - Dynamic scan window adjustment
+  - Success rate optimization
+  - Environmental condition adaptation
 
-### SLA Monitoring Pipeline
-- MUST: Track service levels using `src/metrics/slaMonitoring.js`
-  - Availability (99%)
-  - Error rates (1%)
-  - Response times (1000ms)
-- AVOID: Missing SLA violations
-- WHY: Ensures service quality commitments
-- EXAMPLE: `src/metrics/predictiveScaling.js` load forecasting
+3. Security Data Flow
+- Progressive threat tracking with severity classification
+- Multi-level session management:
+  - Encrypted session storage
+  - Single-use authorization codes
+  - Automatic expiration handling
+- Rate limiting with sliding window implementation
 
-### Batch Compression Flow
-- MUST: Implement compression in `src/mcp/server/BatchCompressor.js`
-  - Header specification
-  - Algorithm selection
-  - Level adaptation
-- AVOID: Compressing small payloads
-- WHY: Optimizes bandwidth usage
-- EXAMPLE: `src/utils/CompressionUtils.js` compression format
+4. Metrics Flow
+- Custom metrics collection framework for BLE/WebSocket connections
+- Resource prediction system:
+  - Memory utilization forecasting
+  - CPU usage prediction
+  - Network bandwidth forecasting
+- SLA violation tracking with priority hierarchy:
+  - Availability (99% threshold)
+  - Error rate (1% threshold)
+  - Response time (1000ms threshold)
+
+5. Inter-Component Communication
+- Batch processing system with priority queues
+- Dynamic compression selection
+- Automatic retry mechanisms for high-priority operations
+- Connection parameter optimization based on:
+  - Device priority
+  - Battery levels
+  - Data transfer rates
+  - Connection stability
+
+The data flow architecture emphasizes priority-based message handling, secure transmission, and adaptive resource management across all system components.
 
 $END$

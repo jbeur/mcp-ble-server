@@ -1,68 +1,58 @@
+---
+description: Defines security architecture, authentication flows, and threat protection for Bluetooth Low Energy device management
+globs: ["src/security/**/*", "src/auth/**/*", "src/mcp/security/**/*"]
+alwaysApply: false
+---
+
+
 # security-model
 
-### Authentication Flows
-- MUST: Implement dual-key rotation system with maximum 2 valid keys per client
-  - Use `src/auth/ApiKeyRotation.js` for rotation logic
-  - Enforce 7-day maximum key age
-  - Maintain 24-hour rotation interval
-- AVOID: Single key systems or client-provided session IDs
-- WHY: Enables zero-downtime credential rotation while preventing session fixation
-- EXAMPLE: See `src/auth/AuthService.js` implementation
+Core Security Architecture:
 
-### Request Signing
-- MUST: Use HMAC-based signing with required components:
-  - HTTP method
-  - Path
-  - Headers
-  - Request body
-  - 5-minute timestamp tolerance
-  - Implemented in `src/auth/RequestSigning.js`
-- AVOID: Simple token-based auth or plaintext credentials
-- WHY: Prevents request tampering and replay attacks
-- EXAMPLE: See `src/mcp/security/RequestSigning.js`
+1. Authentication Framework
+- Multi-tier authentication system combining OAuth2 and custom token authentication
+- Progressive security checks including session fixation prevention, brute force protection
+- Single-use authorization codes with strict client ID binding
+- Session management with 1-hour expiration and concurrent limits (max 3 sessions/user)
 
-### Session Security 
-- MUST: Implement using:
-  - AES-256-GCM encryption
-  - Per-session IV generation
-  - Authentication tags
-  - 1-hour session lifetime
-  - Rolling activity window
-- AVOID: Static encryption keys or IVs
-- WHY: Ensures session data confidentiality and integrity
-- EXAMPLE: See `src/auth/SessionEncryption.js`
+2. Request Security 
+- Custom request signing protocol using HMAC with required headers validation
+- 5-minute timestamp tolerance window
+- Session-specific encryption using AES-256-GCM
+- Dual-token system (access + refresh) with token jittering (0-30s random delay)
 
-### Threat Detection
-- MUST: Implement multi-factor analysis:
-  - Track auth failures with 5-attempt limit
-  - 15-minute lockout duration
-  - Both IP and client-based blocking
-  - Severity-based response system
-  - Use `src/security/ThreatDetectionService.js`
-- AVOID: Single-factor blocks or permanent bans
-- WHY: Provides graduated response to potential threats
-- EXAMPLE: See auth failure handling in `src/security/ThreatDetectionService.js`
+3. Rate Limiting & Threat Detection
+- Sliding window rate limiting tracking per-client requests
+- Immediate blocking for high-severity threats
+- Progressive threat tracking per client
+- IP-based and Client-based blocking mechanisms
+- Auto-blocks after configurable auth failures
 
-### Vulnerability Scanning
-- MUST: Check for:
-  - SweynTooth vulnerabilities (CVSS 9.8)
-  - BLESA vulnerabilities (CVSS 8.5)
-  - Weak authentication methods (CVSS 8.0)
-  - Insufficient key sizes (CVSS 7.0)
-  - Use `src/security/VulnerabilityScanner.js`
-- AVOID: Single vulnerability checks or manual scanning
-- WHY: Proactive detection of common BLE security issues
-- EXAMPLE: See scan implementation in `src/security/VulnerabilityScanner.js`
+4. Device Security Assessment
+- Multi-factor security scoring (0-10 scale) based on:
+  - Vulnerability scanning results 
+  - Authentication security
+  - Rate limiting configuration
+  - Threat detection posture
+- BLE-specific vulnerability scanning:
+  - SweynTooth detection
+  - BLESA assessment
+  - Authentication/encryption validation
+  - Attack vector analysis
 
-### Rate Limiting
-- MUST: Implement sliding window rate limiting:
-  - Client-specific tracking
-  - Configurable window sizes
-  - Priority-based limits
-  - "Fail-closed" default policy
-  - Use `src/security/RateLimiter.js`
-- AVOID: Fixed window or global rate limits
-- WHY: Prevents abuse while maintaining service for legitimate users
-- EXAMPLE: See `src/auth/RateLimiter.js`
+5. Security Monitoring
+- Comprehensive audit trails for security events
+- Security scoring with weighted criteria
+- Concurrent audit management
+- Risk-based security recommendations
+
+Key Files:
+- src/security/SecurityManager.js
+- src/security/ThreatDetectionService.js  
+- src/security/VulnerabilityScanner.js
+- src/auth/SessionEncryption.js
+- src/auth/TokenAuthentication.js
+- src/auth/OAuth2Service.js
+- src/mcp/security/MessageSecurity.js
 
 $END$

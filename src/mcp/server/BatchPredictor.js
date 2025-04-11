@@ -58,8 +58,16 @@ class BatchPredictor extends EventEmitter {
   }
 
   _calculateAverageLatency(history) {
-    const latencies = history.map(point => point.latency);
-    return latencies.reduce((sum, lat) => sum + lat, 0) / latencies.length;
+    if (Array.isArray(history)) {
+      const latencies = history.map(point => point.latency);
+      return latencies.reduce((sum, lat) => sum + lat, 0) / latencies.length;
+    } else {
+      // Handle metrics object format
+      const priorities = Object.values(history.priorities || {});
+      const totalLatency = priorities.reduce((sum, p) => sum + p.latency, 0);
+      const totalCount = priorities.reduce((sum, p) => sum + p.count, 0);
+      return totalCount > 0 ? totalLatency / totalCount : 0;
+    }
   }
 
   _calculateErrorRate(history) {
@@ -157,14 +165,15 @@ class BatchPredictor extends EventEmitter {
 
   addDataPoint(dataPoint) {
     try {
+      // Handle both metrics object and raw data point formats
       const point = {
         timestamp: Date.now(),
-        messageCount: dataPoint.messageCount || 0,
-        batchSize: dataPoint.batchSize || 0,
-        latency: dataPoint.latency || 0,
-        errors: dataPoint.errors || 0,
-        compressionRatio: dataPoint.compressionRatio,
-        resourceUsage: dataPoint.resourceUsage || 0
+        messageCount: dataPoint.totalMessages || dataPoint.messageCount || 0,
+        batchSize: dataPoint.averageBatchSize || dataPoint.batchSize || 0,
+        latency: this._calculateAverageLatency(dataPoint),
+        errors: dataPoint.totalErrors || dataPoint.errors || 0,
+        compressionRatio: dataPoint.compression?.averageCompressionRatio || dataPoint.compressionRatio,
+        resourceUsage: dataPoint.performance?.currentLoad || dataPoint.resourceUsage || 0
       };
 
       this.trainingData.push(point);
@@ -179,6 +188,9 @@ class BatchPredictor extends EventEmitter {
       if (features) {
         this._updateModel(features, point.batchSize);
       }
+
+      // Analyze and emit prediction if needed
+      this._analyze();
     } catch (error) {
       logger.error('Error adding data point to predictor', { error, dataPoint });
     }
@@ -212,6 +224,60 @@ class BatchPredictor extends EventEmitter {
       lastPrediction: null,
       featureImportance: {}
     };
+  }
+
+  predictAdjustment(currentLoad, threshold, metrics) {
+    try {
+      // Add the current metrics to our training data
+      this.addDataPoint(metrics);
+
+      // Calculate features from the latest metrics
+      const features = this._calculateFeatures([metrics]);
+      if (!features) {
+        return 0; // No adjustment if we can't calculate features
+      }
+
+      // Get the current prediction
+      const prediction = this._predict(features);
+      
+      // Calculate adjustment based on current load and threshold
+      let adjustment = 0;
+      if (currentLoad > threshold) {
+        // System is overloaded, decrease batch size
+        adjustment = -0.1;
+      } else if (currentLoad < threshold * 0.5) {
+        // System is underutilized, increase batch size
+        adjustment = 0.1;
+      }
+
+      // Scale adjustment based on prediction confidence
+      adjustment *= this.metrics.accuracy;
+
+      return adjustment;
+    } catch (error) {
+      logger.error('Error in predictAdjustment', { error });
+      return 0; // Return no adjustment on error
+    }
+  }
+
+  _analyze() {
+    if (this.trainingData.length < 2) {
+      return;
+    }
+
+    try {
+      const latestPoint = this.trainingData[this.trainingData.length - 1];
+      const features = this._calculateFeatures([latestPoint]);
+      const prediction = this._predict(features);
+
+      this.emit('prediction', {
+        confidence: this.metrics.accuracy,
+        recommendedBatchSize: prediction,
+        features
+      });
+    } catch (error) {
+      logger.error('Error analyzing batch metrics', { error });
+    }
   }
 }
 

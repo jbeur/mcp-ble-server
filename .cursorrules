@@ -1,5 +1,12 @@
 
 START SPECIFICATION:
+---
+description: Create high-level documentation focused on business logic organization, domain-specific implementations, and critical data flows when multiple source files contain interconnected business functionality
+globs: src/**/*.js, docs/**/*.js, scripts/**/*.js
+alwaysApply: false
+---
+
+
 # main-overview
 
 ## Development Guidelines
@@ -11,63 +18,58 @@ START SPECIFICATION:
 - Explain your OBSERVATIONS clearly, then provide REASONING to identify the exact issue. Add console logs when needed to gather more information.
 
 
-The system implements a comprehensive BLE device management and monitoring platform with several core business domains:
+The system implements a comprehensive Bluetooth Low Energy (BLE) device management platform with integrated security, authentication, and monitoring capabilities.
 
-1. Predictive Resource Management (src/metrics/)
-- Predictive load scaling using time-series analysis
-- Resource forecasting for memory, CPU, network
-- Multi-factor scaling recommendations engine
-- Hierarchical SLA monitoring with violation priority system
+Core Business Architecture:
 
-2. Authentication & Security (src/auth/, src/security/)
-- OAuth2 implementation with custom token lifecycle
-- Multi-layer API key management with rotation
-- Threat detection with severity-based responses
-- Security scoring and auditing system
+1. BLE Management Layer
+- Connection pooling with adaptive scaling based on device priorities
+- Dynamic power level optimization considering RSSI, battery levels, and stability
+- Priority-based scanning system with weighted slot allocation
+- Characteristic operations with tiered priority processing
 
-3. BLE Device Management (src/ble/)
-- Priority-based connection pooling
-- Adaptive device discovery optimization
-- Signal quality monitoring with RSSI thresholds
-- Power level adjustment based on device priorities
+2. Authentication & Security
+- Multi-level security implementation with progressive checks
+- OAuth2-based authorization with strict client binding
+- Rate limiting using sliding window algorithm
+- Threat detection with severity-based blocking policies
+- API key rotation with dual-phase validity periods
 
-4. Message Control Protocol (src/mcp/)
-- Priority-based message batching
-- Circuit breaker pattern for connection management
-- Transaction consistency with automatic recovery
-- Resource limiting with dynamic thresholds
+3. Device Communication Protocol (MCP)
+- Message batching with priority-based ordering
+- Priority-weighted connection allocation
+- Resource management with multi-dimensional monitoring
+- Circuit breaker pattern with priority-based recovery
 
-5. Core Metrics & Analysis (src/metrics/)
-- Resource trend analysis with confidence scoring
-- Predictive scaling recommendations
-- SLA compliance monitoring
-- Performance metric collection
+4. Metrics & Monitoring
+- SLA monitoring with three-tier violation hierarchy
+- Predictive resource management using time-series forecasting
+- Comprehensive security scoring system
+- Real-time trend analysis for resource utilization
 
-Code Conventions:
+Key Business Components:
 
-### Device Management 
-- MUST: Implement priority levels (HIGH/MEDIUM/LOW) for all device operations
-- AVOID: Direct device connections without going through connection pool
-- WHY: Ensures consistent resource management and priority handling
-- EXAMPLE: src/ble/ConnectionPool.js priority system implementation
+src/ble/
+- ConnectionPool.js: Dynamic connection management
+- PowerLevelAdjustment.js: Multi-factor power optimization
+- PriorityScanning.js: Priority-based device discovery
 
-### Security Implementation
-- MUST: Use dual-token system with refresh/access tokens
-- AVOID: Storing tokens without encryption
-- WHY: Maintains security while enabling token rotation
-- EXAMPLE: src/auth/TokenAuthentication.js token lifecycle
+src/security/
+- SecurityManager.js: Comprehensive security orchestration
+- VulnerabilityScanner.js: BLE-specific vulnerability assessment
+- ThreatDetectionService.js: Progressive threat tracking
 
-### Message Processing
-- MUST: Implement batching based on priority tiers
-- AVOID: Single message processing without batching consideration
-- WHY: Optimizes throughput while maintaining priority handling
-- EXAMPLE: src/mcp/server/MessageBatcher.js implementation
+src/mcp/server/
+- MessageBatcher.js: Priority-based message processing
+- ResourceLimiter.js: Multi-dimensional resource control
+- HighAvailability.js: Priority-weighted failover logic
 
-### Monitoring
-- MUST: Track all SLA metrics with violation priorities
-- AVOID: Direct metric collection without priority classification
-- WHY: Enables proper violation handling and escalation
-- EXAMPLE: src/metrics/slaMonitoring.js violation tracking
+src/metrics/
+- slaMonitoring.js: Three-tier SLA enforcement
+- predictiveScaling.js: Resource forecasting
+- scalingRecommendations.js: Multi-factor scaling decisions
+
+The system emphasizes priority-based resource management across all components, with specific focus on maintaining reliable BLE connections while optimizing power consumption and security.
 
 $END$
 END SPECIFICATION
