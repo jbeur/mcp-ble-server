@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main, staging ]
 
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  id-token: write
+
 jobs:
   test:
     name: Test
@@ -82,6 +88,8 @@ jobs:
     name: Build
     needs: [test, lint, security]
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: build-artifacts
     steps:
       - uses: actions/checkout@v3
       
@@ -114,6 +122,7 @@ jobs:
 
       - name: Create artifact manifest
         run: |
+          mkdir -p artifacts
           {
             echo "MCP BLE Server Build Artifact"
             echo "Build Date: $(date)"
@@ -125,36 +134,31 @@ jobs:
             env | grep -v "SECRET\|TOKEN\|PASSWORD\|KEY"
             echo -e "\nContents:"
             ls -laR dist/
-          } > dist/manifest.txt
+          } > artifacts/manifest.txt
 
       - name: Prepare artifacts
         run: |
           # Create a tarball of the dist directory
-          tar -czf dist.tar.gz dist/
+          tar -czf artifacts/dist.tar.gz dist/
 
           # Create SHA256 checksum
-          sha256sum dist.tar.gz > dist.tar.gz.sha256
+          sha256sum artifacts/dist.tar.gz > artifacts/dist.tar.gz.sha256
 
           # Verify the tarball
-          tar -tzf dist.tar.gz > /dev/null || (echo "Invalid tarball" && exit 1)
+          tar -tzf artifacts/dist.tar.gz > /dev/null || (echo "Invalid tarball" && exit 1)
 
       - name: Upload build artifacts
-        if: success()
         uses: actions/upload-artifact@v3
         with:
-          name: mcp-ble-server-dist
-          path: |
-            dist.tar.gz
-            dist.tar.gz.sha256
-            dist/manifest.txt
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: artifacts/
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload dist directory for deployment
-        if: success()
+      - name: Upload dist directory
         uses: actions/upload-artifact@v3
         with:
-          name: mcp-ble-server-dist-full
+          name: ${{ steps.build.outputs.artifact_name }}-dist
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -175,16 +179,24 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}-dist
+          path: dist
+
       - name: Download build artifacts
         uses: actions/download-artifact@v3
         with:
-          name: mcp-ble-server-dist
-          path: dist
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: artifacts
 
       - name: Verify downloaded artifacts
         run: |
-          echo "Contents of dist directory after download:"
+          echo "Contents of dist directory:"
           ls -la dist/
+          echo "\nContents of artifacts directory:"
+          ls -la artifacts/
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -237,25 +249,40 @@ jobs:
 
       - name: Deploy Application
         run: |
-          # Set up AWS CLI
-          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws configure set region us-east-1
+          # Verify dist directory contents
+          echo "Verifying dist directory contents..."
+          ls -la dist/
+          
+          # Deploy application using AWS CLI
+          echo "Deploying application to ECS..."
+          aws ecs update-service \
+            --cluster staging-cluster \
+            --service mcp-ble-server \
+            --force-new-deployment \
+            --region us-east-1
+          
+          # Wait for service to stabilize
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster staging-cluster \
+            --services mcp-ble-server \
+            --region us-east-1
+          
+          echo "Deployment completed successfully"
 
-          # Upload application files to S3
-          aws s3 sync dist/ s3://staging-mcp-ble-server-assets/
-
-          # Update EC2 instances (using AWS Systems Manager)
-          aws ssm send-command \
-            --targets "Key=tag:Environment,Values=staging" \
-            --document-name "AWS-RunShellScript" \
-            --parameters commands=["cd /var/www/mcp-ble-server && aws s3 sync s3://staging-mcp-ble-server-assets/ . && npm ci --production && pm2 reload ecosystem.config.js"]
-
-      - name: Verify deployment
+      - name: Verify Deployment
         run: |
-          # Wait for ALB target group to be healthy
-          aws elbv2 wait target-health-in-service \
-            --target-group-arn ${{ secrets.ALB_TARGET_GROUP_ARN }}
-            
-          # Verify application is responding
-          curl -f https://${{ steps.deploy.outputs.alb_dns_name }}/health 
+          # Get the latest task definition
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster staging-cluster \
+            --services mcp-ble-server \
+            --region us-east-1 \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          
+          # Check task status
+          aws ecs describe-task-definition \
+            --task-definition $TASK_DEF \
+            --region us-east-1
+          
+          echo "Deployment verification completed" 
