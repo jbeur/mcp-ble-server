@@ -4,7 +4,16 @@ const { BLEService } = require('../../../src/ble/bleService');
 const { BLEScanError, BLEConnectionError, BLECharacteristicError } = require('../../../src/utils/bleErrors');
 const { logger } = require('../../../src/utils/logger');
 
-jest.mock('@abandonware/noble');
+// Mock noble module
+jest.mock('@abandonware/noble', () => {
+  const EventEmitter = require('events');
+  const mockNoble = new EventEmitter();
+  mockNoble.startScanningAsync = jest.fn().mockResolvedValue();
+  mockNoble.stopScanningAsync = jest.fn().mockResolvedValue();
+  mockNoble.state = 'poweredOn';
+  return mockNoble;
+});
+
 jest.mock('../../../src/utils/logger');
 
 // Increase Jest timeout for all tests
