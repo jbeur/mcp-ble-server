@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const logger = require('../src/utils/logger');
 
 function verifyBuild() {
   const distPath = path.join(process.cwd(), 'dist');
@@ -10,7 +11,7 @@ function verifyBuild() {
     'node_modules'
   ];
 
-  console.log('Verifying build output...');
+  logger.info('Verifying build output...');
 
   // Check if dist directory exists
   if (!fs.existsSync(distPath)) {
@@ -56,13 +57,16 @@ function verifyBuild() {
     throw new Error(`Build failed: missing transpiled files: ${missingFiles.join(', ')}`);
   }
 
-  console.log('Build verification completed successfully');
-  process.exit(0);
+  logger.info('Build verification completed successfully');
+  return true;
 }
 
 try {
-  verifyBuild();
+  const success = verifyBuild();
+  if (!success) {
+    throw new Error('Build verification failed');
+  }
 } catch (error) {
-  console.error(error.message);
-  process.exit(1);
+  logger.error(error.message);
+  throw error;
 } 
