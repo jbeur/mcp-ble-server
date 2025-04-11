@@ -25,6 +25,10 @@ class DeviceDiscoveryOptimization {
 
   async calculateOptimalScanWindow(deviceDensity) {
     try {
+      if (typeof deviceDensity !== 'number' || deviceDensity < 0) {
+        throw new Error('Invalid device density value');
+      }
+
       // Base window calculation on device density
       let baseWindow = this.config.defaultScanWindow;
             
@@ -62,8 +66,12 @@ class DeviceDiscoveryOptimization {
 
   async adjustScanWindow(successRate) {
     try {
+      if (typeof successRate !== 'number' || successRate < 0 || successRate > 1) {
+        throw new Error('Invalid success rate value');
+      }
+
       // Calculate base window size inversely proportional to success rate
-      const baseWindow = this.config.defaultScanWindow * (1 / successRate);
+      const baseWindow = this.config.defaultScanWindow * (1 / (successRate || 0.1));
             
       // Apply adjustment factor
       const adjustmentFactor = Math.max(0, this.config.successRateThreshold - successRate);
@@ -80,8 +88,6 @@ class DeviceDiscoveryOptimization {
       if (successRate >= this.config.successRateThreshold) {
         this.metrics.successfulScans++;
       }
-
-      // Update current window
       this.currentWindow = newWindow;
 
       logger.debug('Scan window adjustment:', {
@@ -100,23 +106,26 @@ class DeviceDiscoveryOptimization {
   }
 
   getScanWindowMetrics() {
+    const totalScans = this.metrics.totalScans || 0;
+    const successfulScans = this.metrics.successfulScans || 0;
+    const totalWindowTime = this.metrics.totalWindowTime || 0;
+    const deviceDensityHistory = this.metrics.deviceDensityHistory || [];
+    const successRateHistory = this.metrics.successRateHistory || [];
+
     return {
-      totalScans: this.metrics.totalScans,
-      successfulScans: this.metrics.successfulScans,
-      averageWindow: this.metrics.totalScans > 0 
-        ? this.metrics.totalWindowTime / this.metrics.totalScans 
+      totalScans,
+      successfulScans,
+      averageWindow: totalScans > 0 ? totalWindowTime / totalScans : 0,
+      successRate: totalScans > 0 ? successfulScans / totalScans : 0,
+      averageDeviceDensity: deviceDensityHistory.length > 0
+        ? deviceDensityHistory.reduce((a, b) => a + b, 0) / deviceDensityHistory.length
         : 0,
-      successRate: this.metrics.totalScans > 0 
-        ? this.metrics.successfulScans / this.metrics.totalScans 
+      averageSuccessRate: successRateHistory.length > 0
+        ? successRateHistory.reduce((a, b) => a + b, 0) / successRateHistory.length
         : 0,
-      averageDeviceDensity: this.metrics.deviceDensityHistory.length > 0
-        ? this.metrics.deviceDensityHistory.reduce((a, b) => a + b, 0) / 
-                  this.metrics.deviceDensityHistory.length
-        : 0,
-      averageSuccessRate: this.metrics.successRateHistory.length > 0
-        ? this.metrics.successRateHistory.reduce((a, b) => a + b, 0) / 
-                  this.metrics.successRateHistory.length
-        : 0
+      currentWindow: this.currentWindow,
+      minWindow: this.config.minScanWindow,
+      maxWindow: this.config.maxScanWindow
     };
   }
 }

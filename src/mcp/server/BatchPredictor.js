@@ -34,6 +34,7 @@ class BatchPredictor extends EventEmitter {
       featureImportance: {}
     };
 
+    this.predictionTimer = null;
     this._startPredictionLoop();
   }
 
@@ -124,19 +125,25 @@ class BatchPredictor extends EventEmitter {
   }
 
   _startPredictionLoop() {
+    if (this.predictionTimer) {
+      clearInterval(this.predictionTimer);
+    }
+
     this.predictionTimer = setInterval(() => {
       try {
         const features = this._calculateFeatures(this.trainingData);
         const prediction = this._predict(features);
         this.emit('prediction', {
-          recommendedBatchSize: prediction.batchSize,
-          confidence: prediction.confidence,
+          recommendedBatchSize: prediction,
+          confidence: this.metrics.accuracy,
           features
         });
       } catch (error) {
         logger.error('Error in prediction loop:', error);
       }
     }, this.config.predictionInterval);
+
+    // Unref the timer to prevent it from keeping the process alive
     this.predictionTimer.unref();
   }
 
@@ -145,6 +152,7 @@ class BatchPredictor extends EventEmitter {
       clearInterval(this.predictionTimer);
       this.predictionTimer = null;
     }
+    this.removeAllListeners();
   }
 
   addDataPoint(dataPoint) {

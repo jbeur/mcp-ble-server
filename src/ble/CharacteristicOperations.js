@@ -248,202 +248,169 @@ class CharacteristicOperations {
       this.priorityDistribution.set(deviceId, { high: 0, medium: 0, low: 0 });
       this.metrics.set(deviceId, {
         totalOperations: 0,
-        readOperations: 0,
-        writeOperations: 0,
-        totalOperationTime: 0,
         batchedOperations: 0,
-        averageResponseTime: 0
+        totalOperationTime: 0,
+        averageResponseTime: 0,
+        lastOperationTime: 0
+      });
+      this.batchStats.set(deviceId, {
+        batchedReads: 0,
+        batchedWrites: 0,
+        totalBatches: 0,
+        averageBatchSize: 0
+      });
+      this.errorStats.set(deviceId, {
+        totalErrors: 0,
+        lastError: null
       });
     }
 
     const queue = this.operationQueues.get(deviceId);
-    const priorityDist = this.priorityDistribution.get(deviceId);
-
-    // Ensure valid priority
-    if (!['high', 'medium', 'low'].includes(operation.priority)) {
-      operation.priority = 'medium'; // Default to medium priority
-    }
+    queue.push(operation);
+    this.operationQueues.set(deviceId, queue);
 
     // Update priority distribution
+    const priorityDist = this.priorityDistribution.get(deviceId);
     priorityDist[operation.priority]++;
     this.priorityDistribution.set(deviceId, priorityDist);
 
-    // Insert operation in priority order
-    const priorityOrder = { high: 0, medium: 1, low: 2 };
-    const insertIndex = queue.findIndex(op => 
-      priorityOrder[op.priority] > priorityOrder[operation.priority] ||
-            (priorityOrder[op.priority] === priorityOrder[operation.priority] && 
-             op.timestamp > operation.timestamp)
-    );
-        
-    if (insertIndex === -1) {
-      queue.push(operation);
-    } else {
-      queue.splice(insertIndex, 0, operation);
-    }
-
-    this._updateMetrics(deviceId, operation);
-
-    // Process queue if it reaches batch size or after timeout
+    // Process batch if queue size reaches maxBatchSize
     if (queue.length >= this.config.maxBatchSize) {
-      await this._processBatch(deviceId);
-    } else {
-      const timeoutPromise = new Promise(resolve => {
-        setTimeout(async () => {
-          await this._processBatch(deviceId);
-          resolve();
-        }, this.config.batchTimeout);
-      });
-            
-      if (!this.pendingBatches.has(deviceId)) {
-        this.pendingBatches.set(deviceId, []);
-      }
-      this.pendingBatches.get(deviceId).push(timeoutPromise);
+      return this._processBatch(deviceId);
     }
 
-    // Simulate operation result with response time tracking
-    const startTime = Date.now();
-    await new Promise(resolve => setTimeout(resolve, 1)); // Reduced processing time
-    const endTime = Date.now();
-    this._updateResponseTime(deviceId, endTime - startTime);
+    // Start batch timeout if not already running
+    if (!this.pendingBatches.has(deviceId)) {
+      this.pendingBatches.set(deviceId, []);
+      setTimeout(() => this._processBatch(deviceId), this.config.batchTimeout);
+    }
 
-    return Buffer.from([0]); // Dummy result
+    return Promise.resolve();
   }
 
   async _processBatch(deviceId) {
-    const queue = this.operationQueues.get(deviceId);
-    if (!queue || queue.length === 0) return;
-
     try {
-      // Process operations in batches (queue is already sorted by priority)
-      const batch = queue.splice(0, this.config.maxBatchSize);
+      const queue = this.operationQueues.get(deviceId) || [];
+      if (queue.length === 0) return;
 
-      // Sort batch by priority and timestamp (most recent first for same priority)
-      batch.sort((a, b) => {
+      // Sort operations by priority and timestamp
+      queue.sort((a, b) => {
         const priorityOrder = { high: 0, medium: 1, low: 2 };
         const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
-        return priorityDiff || b.timestamp - a.timestamp;
+        return priorityDiff || a.timestamp - b.timestamp;
       });
 
-      this._updateBatchStats(deviceId, batch);
+      // Process operations in batches
+      const batchSize = Math.min(queue.length, this.config.maxBatchSize);
+      const batch = queue.splice(0, batchSize);
+      this.operationQueues.set(deviceId, queue);
 
-      // Update operation history with sorted batch
-      const history = this.operationHistory.get(deviceId) || [];
+      // Update batch stats
+      const batchStats = this.batchStats.get(deviceId);
+      batchStats.totalBatches++;
+      batchStats.averageBatchSize = (batchStats.averageBatchSize * (batchStats.totalBatches - 1) + batch.length) / batchStats.totalBatches;
+      
+      // Count batched operations by type
       batch.forEach(op => {
+        if (op.type === 'read') batchStats.batchedReads++;
+        if (op.type === 'write') batchStats.batchedWrites++;
+      });
+      
+      this.batchStats.set(deviceId, batchStats);
+
+      // Process each operation in the batch
+      const startTime = Date.now();
+      const results = await Promise.allSettled(
+        batch.map(async op => {
+          try {
+            const result = await this._executeOperation(deviceId, op);
+            this._updateMetrics(deviceId, op);
+            return result;
+          } catch (error) {
+            this._recordError(deviceId, op.charUuid, op.type, error);
+            throw error;
+          }
+        })
+      );
+
+      // Update operation history
+      const history = this.operationHistory.get(deviceId);
+      batch.forEach((op, index) => {
         history.unshift({
           ...op,
-          status: 'success'
+          status: results[index].status,
+          result: results[index].status === 'fulfilled' ? results[index].value : results[index].reason,
+          timestamp: Date.now()
         });
       });
-
-      if (history.length > 100) {
-        history.splice(100); // Keep last 100 operations
-      }
-
-      // Sort entire history by priority and timestamp (most recent first for same priority)
-      history.sort((a, b) => {
-        const priorityOrder = { high: 0, medium: 1, low: 2 };
-        const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
-        return priorityDiff || b.timestamp - a.timestamp;
-      });
-
       this.operationHistory.set(deviceId, history);
 
-      // Update batched operations count
-      const metrics = this._getMetrics(deviceId);
-      metrics.batchedOperations = (metrics.batchedOperations || 0) + batch.length;
-      metrics.totalOperationTime = (metrics.totalOperationTime || 0) + 1; // Reduced processing time
-      this.metrics.set(deviceId, metrics);
+      // Update performance metrics
+      const totalTime = Date.now() - startTime;
+      this._updateResponseTime(deviceId, totalTime / batch.length);
 
-      // Simulate batch processing
-      const startTime = Date.now();
-      await new Promise(resolve => setTimeout(resolve, 1)); // Reduced processing time
-      const endTime = Date.now();
-            
-      // Update response times for batch
-      batch.forEach(() => {
-        this._updateResponseTime(deviceId, (endTime - startTime) / batch.length);
-      });
-
-      logger.debug('Batch processed:', { deviceId, batchSize: batch.length });
+      return results;
     } catch (error) {
       logger.error('Error processing batch:', error);
-      this._recordError(deviceId, 'batch', 'processBatch', error);
       throw error;
     }
   }
 
+  async _executeOperation(deviceId, _operation) {
+    // Simulate operation execution
+    await new Promise(resolve => setTimeout(resolve, 10));
+    return { success: true, operation: _operation };
+  }
+
   _updateMetrics(deviceId, operation) {
-    const metrics = this._getMetrics(deviceId);
-        
-    metrics.totalOperations = (metrics.totalOperations || 0) + 1;
-    metrics.totalOperationTime = (metrics.totalOperationTime || 0) + 1; // Reduced processing time
-        
-    if (operation.type === 'read') {
-      metrics.readOperations = (metrics.readOperations || 0) + 1;
-    } else if (operation.type === 'write') {
-      metrics.writeOperations = (metrics.writeOperations || 0) + 1;
-    }
-        
+    const metrics = this.metrics.get(deviceId);
+    metrics.totalOperations++;
+    metrics.batchedOperations++;
     this.metrics.set(deviceId, metrics);
   }
 
   _updateResponseTime(deviceId, responseTime) {
-    const metrics = this._getMetrics(deviceId);
-    const currentAvg = metrics.averageResponseTime || 0;
-    const totalOps = metrics.totalOperations || 1;
-    metrics.averageResponseTime = (currentAvg * (totalOps - 1) + responseTime) / totalOps;
+    const metrics = this.metrics.get(deviceId);
+    metrics.lastOperationTime = responseTime;
+    metrics.averageResponseTime = (metrics.averageResponseTime * (metrics.totalOperations - 1) + responseTime) / metrics.totalOperations;
     this.metrics.set(deviceId, metrics);
   }
 
   _updateBatchStats(deviceId, batch) {
-    const stats = this.batchStats.get(deviceId) || {
-      batchedReads: 0,
-      batchedWrites: 0,
-      totalBatches: 0,
-      averageBatchSize: 0
-    };
-
-    const reads = batch.filter(op => op.type === 'read').length;
-    const writes = batch.filter(op => op.type === 'write').length;
-
-    stats.batchedReads += reads;
-    stats.batchedWrites += writes;
+    const stats = this.batchStats.get(deviceId);
     stats.totalBatches++;
-    stats.averageBatchSize = 
-            (stats.batchedReads + stats.batchedWrites) / stats.totalBatches;
-
+    stats.averageBatchSize = (stats.averageBatchSize * (stats.totalBatches - 1) + batch.length) / stats.totalBatches;
     this.batchStats.set(deviceId, stats);
   }
 
   _recordError(deviceId, charUuid, type, error) {
-    const stats = this.errorStats.get(deviceId) || {
-      totalErrors: 0,
-      lastError: null
-    };
-
+    const stats = this.errorStats.get(deviceId);
     stats.totalErrors++;
-    stats.lastError = error.message;
-
+    stats.lastError = {
+      charUuid,
+      type,
+      message: error.message,
+      timestamp: Date.now()
+    };
     this.errorStats.set(deviceId, stats);
+    logger.error(`Error in ${type} operation:`, error);
   }
 
   _getMetrics(deviceId) {
     return this.metrics.get(deviceId) || {
       totalOperations: 0,
-      readOperations: 0,
-      writeOperations: 0,
-      totalOperationTime: 0,
       batchedOperations: 0,
-      averageResponseTime: 0
+      totalOperationTime: 0,
+      averageResponseTime: 0,
+      lastOperationTime: 0
     };
   }
 
   async _validateCharacteristic(deviceId, charUuid) {
-    // Simulate characteristic validation
-    if (charUuid === 'invalidChar') {
-      throw new Error('Invalid characteristic: characteristic not found');
+    if (!deviceId || !charUuid) {
+      throw new Error('Invalid device ID or characteristic UUID');
     }
+    return true;
   }
 }
 
