@@ -139,9 +139,18 @@ class ConnectionPool {
   }
 
   _startIdleConnectionCleaner() {
+    // Clear existing interval if it exists
+    if (this._cleanerInterval) {
+      clearInterval(this._cleanerInterval);
+      this._cleanerInterval = null;
+    }
+
     this._cleanerInterval = setInterval(async () => {
       await this._cleanupIdleConnections();
     }, this._config.healthCheckInterval);
+
+    // Prevent the interval from keeping the process alive
+    this._cleanerInterval.unref();
   }
 
   async _cleanupIdleConnections() {
@@ -270,6 +279,51 @@ class ConnectionPool {
   // For testing purposes
   async forceCleanup() {
     await this._cleanupIdleConnections();
+  }
+
+  async stop() {
+    try {
+      // Clear the cleaner interval if it exists
+      if (this._cleanerInterval) {
+        clearInterval(this._cleanerInterval);
+        this._cleanerInterval = null;
+      }
+
+      // Clear all connections
+      for (const [deviceId, connection] of this._connections) {
+        try {
+          await connection.disconnect();
+        } catch (error) {
+          logger.error('Error disconnecting device during pool stop', {
+            deviceId,
+            error: error.message
+          });
+        }
+      }
+      this._connections.clear();
+
+      // Reset state
+      this._metrics = {
+        totalConnections: 0,
+        activeConnections: 0,
+        failedConnections: 0,
+        reconnections: 0
+      };
+
+      logger.info('Connection pool stopped');
+    } catch (error) {
+      logger.error('Error stopping connection pool', { error: error.message });
+      throw error;
+    }
+  }
+
+  _initializeMetrics() {
+    this._metrics = {
+      totalConnections: 0,
+      activeConnections: 0,
+      failedConnections: 0,
+      reconnections: 0
+    };
   }
 }
 

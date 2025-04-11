@@ -5,8 +5,9 @@ describe('MessageBatcher', () => {
   let mockMetrics;
   
   beforeEach(() => {
-    // Reset all mocks
+    // Reset all mocks and timers
     jest.clearAllMocks();
+    jest.useRealTimers();
     
     // Setup mock metrics
     mockMetrics = {
@@ -23,15 +24,27 @@ describe('MessageBatcher', () => {
       batchTimeout: 1000,
       compressionEnabled: true,
       compressionThreshold: 1000,
-      metrics: mockMetrics
+      metrics: mockMetrics,
+      analytics: {
+        enabled: false // Disable analytics for tests to prevent timer leaks
+      },
+      adaptiveSizing: {
+        enabled: false // Disable adaptive sizing for tests to prevent timer leaks
+      }
     });
   });
 
   afterEach(async () => {
     // Cleanup after each test
     if (batcher) {
+      // Remove all event listeners
+      batcher.removeAllListeners();
+      // Stop the batcher and ensure cleanup
       await batcher.stop();
+      batcher = null;
     }
+    // Ensure we're using real timers
+    jest.useRealTimers();
   });
 
   describe('Initialization', () => {
@@ -99,6 +112,8 @@ describe('MessageBatcher', () => {
       
       // Stop the batcher and ensure cleanup
       if (batcher) {
+        // Remove all event listeners
+        batcher.removeAllListeners();
         await batcher.stop();
         batcher = null;
       }
@@ -113,14 +128,16 @@ describe('MessageBatcher', () => {
       }));
 
       // Create a promise that resolves when all messages are processed
+      let messageHandler;
       const allMessagesProcessed = new Promise(resolve => {
         let count = 0;
-        batcher.on('message', () => {
+        messageHandler = () => {
           count++;
           if (count === messages.length) {
             resolve();
           }
-        });
+        };
+        batcher.on('message', messageHandler);
       });
 
       // Add all messages
@@ -129,12 +146,44 @@ describe('MessageBatcher', () => {
       // Wait for all messages to be processed
       await allMessagesProcessed;
 
+      // Clean up the event listener
+      if (messageHandler) {
+        batcher.removeListener('message', messageHandler);
+      }
+
       // Verify batch was flushed
       expect(batcher.batches.get(clientId)).toBeUndefined();
       expect(batcher.timers.get(clientId)).toBeUndefined();
     });
 
-    // TODO: Re-implement timeout test after fixing timer issues
-    // it('should handle batch timeouts', async () => { ... });
+    it('should handle batch timeouts', async () => {
+      const clientId = 'test-client';
+      const message = { id: 1, data: 'test', priority: 'medium' };
+
+      // Add a message to create a batch
+      await batcher.addMessage(clientId, message);
+
+      // Create a promise that resolves when the batch is flushed
+      let messageHandler;
+      const batchFlushed = new Promise(resolve => {
+        messageHandler = () => resolve();
+        batcher.once('message', messageHandler);
+      });
+
+      // Advance timers
+      jest.advanceTimersByTime(1000);
+
+      // Wait for the batch to be flushed
+      await batchFlushed;
+
+      // Clean up the event listener
+      if (messageHandler) {
+        batcher.removeListener('message', messageHandler);
+      }
+
+      // Verify batch was flushed
+      expect(batcher.batches.get(clientId)).toBeUndefined();
+      expect(batcher.timers.get(clientId)).toBeUndefined();
+    });
   });
 }); 

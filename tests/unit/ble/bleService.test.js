@@ -1,20 +1,21 @@
-const noble = require('@abandonware/noble');
-const { EventEmitter } = require('events');
-const { BLEService } = require('../../../src/ble/bleService');
-const { BLEScanError, BLEConnectionError, BLECharacteristicError } = require('../../../src/utils/bleErrors');
-const { logger } = require('../../../src/utils/logger');
-
-// Mock noble module
+// Mock noble module before any requires
 jest.mock('@abandonware/noble', () => {
   const EventEmitter = require('events');
   const mockNoble = new EventEmitter();
   mockNoble.startScanningAsync = jest.fn().mockResolvedValue();
   mockNoble.stopScanningAsync = jest.fn().mockResolvedValue();
   mockNoble.state = 'poweredOn';
+  mockNoble.removeAllListeners = jest.fn();
   return mockNoble;
 });
 
 jest.mock('../../../src/utils/logger');
+
+const noble = require('@abandonware/noble');
+const { EventEmitter } = require('events');
+const { BLEService } = require('../../../src/ble/bleService');
+const { BLEScanError, BLEConnectionError, BLECharacteristicError } = require('../../../src/utils/bleErrors');
+const { logger } = require('../../../src/utils/logger');
 
 // Increase Jest timeout for all tests
 jest.setTimeout(60000);
@@ -24,9 +25,18 @@ describe('BLEService', () => {
   let mockDevice;
   let mockService;
   let mockCharacteristic;
+  let timeouts = [];
+
+  // Helper to create a tracked timeout
+  const createTimeout = (fn, delay) => {
+    const timeout = setTimeout(fn, delay);
+    timeouts.push(timeout);
+    return timeout;
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
+    timeouts = [];
 
     // Create mock device extending EventEmitter
     mockDevice = new EventEmitter();
@@ -35,6 +45,7 @@ describe('BLEService', () => {
     mockDevice.discoverServices = jest.fn();
     mockDevice.once = jest.fn();
     mockDevice.disconnect = jest.fn();
+    mockDevice.removeAllListeners = jest.fn();
 
     // Create mock service
     mockService = {
@@ -74,10 +85,26 @@ describe('BLEService', () => {
   });
 
   afterEach(async () => {
+    // Clear all timeouts
+    timeouts.forEach(timeout => clearTimeout(timeout));
+    timeouts = [];
+
+    // Remove all listeners
+    noble.removeAllListeners();
+    if (mockDevice) {
+      mockDevice.removeAllListeners();
+    }
+    if (mockCharacteristic) {
+      mockCharacteristic.removeAllListeners();
+    }
+
     // Skip cleanup if we're in the cleanup error test
     if (bleService && !bleService._testSkipCleanup) {
       await bleService.cleanup();
     }
+
+    // Ensure all mocks are restored
+    jest.clearAllMocks();
   });
 
   describe('initialization', () => {
@@ -126,7 +153,10 @@ describe('BLEService', () => {
     });
 
     it('should handle connection timeout', async () => {
-      mockDevice.connect.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 1000)));
+      mockDevice.connect.mockImplementation(() => new Promise(resolve => {
+        const timeout = createTimeout(resolve, 1000);
+        timeout.unref(); // Prevent the timer from keeping the process alive
+      }));
       await expect(bleService.connectToDevice(deviceId)).rejects.toThrow('Connection timeout');
     });
 

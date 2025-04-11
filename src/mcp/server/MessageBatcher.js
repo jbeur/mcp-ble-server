@@ -701,55 +701,37 @@ class MessageBatcher extends EventEmitter {
 
   async stop() {
     try {
-      // Clear all timers with proper cleanup
-      for (const [clientId, batch] of this.batches.entries()) {
-        if (batch.timer) {
-          clearTimeout(batch.timer);
-        }
-      }
-      this.batches.clear();
-      
-      // Flush remaining batches with proper error handling
-      const flushPromises = Array.from(this.batches.entries()).map(async ([clientId, batch]) => {
-        try {
-          if (batch.messages.length > 0) {
-            await this._flushBatch(clientId);
-          }
-        } catch (error) {
-          logger.error('Error flushing batch during shutdown', { 
-            error,
-            clientId,
-            batchSize: batch.messages.length 
-          });
-        }
-      });
-      
-      await Promise.all(flushPromises);
-      
-      // Clear analytics intervals
+      // Clear analytics interval if it exists
       if (this._analyticsInterval) {
         clearInterval(this._analyticsInterval);
         this._analyticsInterval = null;
       }
-      
+
+      // Clear adaptive sizing timer if it exists
       if (this.adaptiveTimer) {
         clearInterval(this.adaptiveTimer);
         this.adaptiveTimer = null;
       }
-      
-      // Reset data structures
+
+      // Clear all batch timers
+      for (const [clientId, timer] of this.timers) {
+        clearTimeout(timer);
+      }
+      this.timers.clear();
+
+      // Clear all batches
       this.batches.clear();
-      this.batchStartTimes = new Map();
-      
-      // Reset metrics with proper structure
+      this.batchStartTimes.clear();
+      this.operationQueues.clear();
+      this.sequenceNumbers.clear();
+
+      // Reset metrics
       this.resetMetrics();
-      
-      logger.info('MessageBatcher stopped successfully', {
-        totalProcessed: this.metrics.totalMessages,
-        activeClients: this.metrics.activeClients
-      });
-      
-      return { success: true };
+
+      // Remove all event listeners
+      this.removeAllListeners();
+
+      logger.info('MessageBatcher stopped successfully');
     } catch (error) {
       logger.error('Error stopping MessageBatcher', { error });
       throw error;
