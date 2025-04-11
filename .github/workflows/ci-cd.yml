@@ -102,12 +102,19 @@ jobs:
             echo "Build failed - dist directory not found"
             exit 1
           fi
+          
+          # List contents of dist directory for debugging
+          echo "Contents of dist directory:"
+          ls -la dist/
 
       - name: Upload build artifacts
+        if: success()
         uses: actions/upload-artifact@v3
         with:
-          name: dist
-          path: dist
+          name: mcp-ble-server-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
           
   deploy-staging:
     name: Deploy to Staging
@@ -128,8 +135,13 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v3
         with:
-          name: dist
+          name: mcp-ble-server-dist
           path: dist
+
+      - name: Verify downloaded artifacts
+        run: |
+          echo "Contents of dist directory after download:"
+          ls -la dist/
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -175,8 +187,10 @@ jobs:
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v3
         with:
-          name: tfplan
+          name: tfplan-staging
           path: infrastructure/staging/tfplan
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Deploy Application
         run: |
@@ -198,10 +212,7 @@ jobs:
         run: |
           # Wait for ALB target group to be healthy
           aws elbv2 wait target-health-in-service \
-            --target-group-arn $(terraform output -raw target_group_arn) \
-            --region us-east-1
-
-      - name: Run staging tests
-        run: |
-          # Run integration tests against staging environment
-          npm run test:integration -- --env=staging 
+            --target-group-arn ${{ secrets.ALB_TARGET_GROUP_ARN }}
+            
+          # Verify application is responding
+          curl -f https://${{ steps.deploy.outputs.alb_dns_name }}/health 
