@@ -89,17 +89,15 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: '18.x'
+          cache: 'npm'
           
       - name: Install dependencies
         run: npm ci
         
       - name: Build
         run: |
-          # Clean any existing dist directory
-          npm run clean
-
-          # Run the build
-          npm run build
+          # Run the build script with detailed output
+          npm run build --verbose
 
           # Debug output
           echo "Build completed. Checking dist directory structure:"
@@ -111,40 +109,34 @@ jobs:
           echo "\nChecking node_modules in dist:"
           ls -la dist/node_modules || echo "No node_modules directory found in dist"
 
-      - name: Verify build
-        run: |
-          if [ ! -d "dist" ]; then
-            echo "Build failed - dist directory not found"
-            exit 1
-          fi
-
-          if [ ! -f "dist/package.json" ]; then
-            echo "Build failed - package.json not found in dist"
-            exit 1
-          fi
-
-          if [ ! -f "dist/ecosystem.config.js" ]; then
-            echo "Build failed - ecosystem.config.js not found in dist"
-            exit 1
-          fi
-
-          if [ ! -d "dist/node_modules" ]; then
-            echo "Build failed - node_modules not found in dist"
-            exit 1
-          fi
-
-          echo "Build verification completed successfully"
-          echo "Contents of dist directory:"
-          ls -la dist/
+      - name: Run build verification
+        run: npm run build:verify
 
       - name: Create artifact manifest
         run: |
-          echo "MCP BLE Server Build Artifact" > dist/manifest.txt
-          echo "Build Date: $(date)" >> dist/manifest.txt
-          echo "Git Commit: ${{ github.sha }}" >> dist/manifest.txt
-          echo "Build Number: ${{ github.run_number }}" >> dist/manifest.txt
-          echo "\nContents:" >> dist/manifest.txt
-          ls -laR dist/ >> dist/manifest.txt
+          {
+            echo "MCP BLE Server Build Artifact"
+            echo "Build Date: $(date)"
+            echo "Git Commit: ${{ github.sha }}"
+            echo "Build Number: ${{ github.run_number }}"
+            echo "Node.js Version: $(node --version)"
+            echo "NPM Version: $(npm --version)"
+            echo -e "\nEnvironment:"
+            env | grep -v "SECRET\|TOKEN\|PASSWORD\|KEY"
+            echo -e "\nContents:"
+            ls -laR dist/
+          } > dist/manifest.txt
+
+      - name: Prepare artifacts
+        run: |
+          # Create a tarball of the dist directory
+          tar -czf dist.tar.gz dist/
+
+          # Create SHA256 checksum
+          sha256sum dist.tar.gz > dist.tar.gz.sha256
+
+          # Verify the tarball
+          tar -tzf dist.tar.gz > /dev/null || (echo "Invalid tarball" && exit 1)
 
       - name: Upload build artifacts
         if: success()
@@ -152,10 +144,18 @@ jobs:
         with:
           name: mcp-ble-server-dist
           path: |
-            dist/
-            !dist/node_modules/*/test/
-            !dist/node_modules/*/tests/
-            !dist/node_modules/*/.git/
+            dist.tar.gz
+            dist.tar.gz.sha256
+            dist/manifest.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload dist directory for deployment
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: mcp-ble-server-dist-full
+          path: dist/
           if-no-files-found: error
           retention-days: 7
           
